@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>THE AVIARY</title>
+<meta name="theme-color" content="#0A0E14">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@700;800&family=Inter:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0A0E14; --panel:#111722; --panel2:#161E2C; --line:#222C3D;
+    --ink:#E8ECF4; --sub:#8B96A8;
+    --forge:#F0A63C; --razor:#6FA8D8; --magpie:#A79BE8;
+    --green:#57C785; --red:#E06550;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;min-height:100dvh;
+    background-image:radial-gradient(70% 40% at 50% -5%, rgba(167,155,232,.08), transparent 60%)}
+  #app{max-width:640px;margin:0 auto;padding:18px 16px calc(env(safe-area-inset-bottom,0px) + 30px)}
+  button{font-family:'Inter';cursor:pointer}
+
+  header{text-align:center;padding:18px 0 6px}
+  .kicker{font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.34em;color:var(--magpie)}
+  h1{font-family:'Sora';font-weight:800;font-size:34px;letter-spacing:.04em;margin-top:6px}
+  .sub{font-size:13px;color:var(--sub);margin-top:6px}
+
+  .council{display:flex;justify-content:center;gap:14px;margin-top:16px}
+  .bird{text-align:center}
+  .bird .av{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;background:var(--panel);border:2px solid var(--line);margin:0 auto;transition:.25s}
+  .bird .nm{font-family:'Space Mono',monospace;font-size:9px;letter-spacing:.14em;color:var(--sub);margin-top:6px}
+  .bird.talking .av{box-shadow:0 0 22px currentColor;border-color:currentColor;transform:scale(1.08)}
+
+  .controls{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:18px}
+  .controls textarea{width:100%;background:var(--bg);border:1.5px solid var(--line);border-radius:12px;padding:12px;font-family:'Inter';font-size:15px;color:var(--ink);outline:none;resize:none;min-height:48px}
+  .controls textarea:focus{border-color:var(--magpie)}
+  .btnrow{display:flex;gap:8px;margin-top:10px}
+  .go{flex:1;border:0;border-radius:12px;background:var(--magpie);color:#141021;font-weight:700;font-size:14px;padding:13px}
+  .kill{border:0;border-radius:12px;background:rgba(224,101,80,.15);color:var(--red);border:1.5px solid rgba(224,101,80,.5);font-weight:800;font-size:13px;padding:0 16px}
+  .meter{display:flex;justify-content:space-between;font-family:'Space Mono',monospace;font-size:10px;color:var(--sub);margin-top:10px;letter-spacing:.06em}
+  .meter b{color:var(--magpie)}
+
+  .status{font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--sub);text-align:center;margin-top:16px;min-height:16px}
+  .status .live{color:var(--green)}
+  .status .dead{color:var(--red)}
+
+  .feed{margin-top:14px;display:flex;flex-direction:column;gap:10px}
+  .msg{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:14px;padding:13px;animation:up .3s ease}
+  @keyframes up{from{opacity:0;transform:translateY(8px)}to{opacity:1}}
+  .msg .who{font-family:'Space Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.1em}
+  .msg .txt{font-size:14.5px;line-height:1.65;margin-top:7px;color:#CBD3E0;white-space:pre-wrap}
+
+  .nb{margin-top:22px}
+  .nb summary{font-family:'Space Mono',monospace;font-size:11px;letter-spacing:.14em;color:var(--sub);cursor:pointer;text-transform:uppercase}
+  .nb pre{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;font-size:12px;line-height:1.6;white-space:pre-wrap;margin-top:10px;color:#B9C2D2;font-family:'Space Mono',monospace}
+  .err{display:none;background:rgba(224,101,80,.1);border:1px solid rgba(224,101,80,.4);color:#F0B5A9;font-size:13px;padding:12px;border-radius:12px;margin-top:12px;line-height:1.5}
+  .err.on{display:block}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="kicker">AGENT LAB · KEEPER'S VIEW</div>
+    <h1>THE AVIARY</h1>
+    <div class="sub">Three minds. One room. Your laws.</div>
+    <div class="council" id="council"></div>
+  </header>
+
+  <div class="controls">
+    <textarea id="topic" placeholder="Give the council a topic… 'Design the perfect feature for a farm AI' / 'Invent a game' / 'What should we build?'"></textarea>
+    <div class="btnrow">
+      <button class="go" onclick="start()">Convene the council</button>
+      <button class="kill" onclick="kill()">⛔ KILL</button>
+    </div>
+    <div class="meter"><span>Session cap: <b id="capT">—</b> turns</span><span>Today: <b id="capU">—</b> calls</span></div>
+  </div>
+
+  <div class="status" id="status">standing by</div>
+  <div class="err" id="err"></div>
+  <div class="feed" id="feed"></div>
+
+  <details class="nb">
+    <summary>📓 The Notebook (council memory)</summary>
+    <pre id="nbtext">loading…</pre>
+  </details>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let lastLen = 0;
+function pin(){ return localStorage.getItem('lab-pin')||''; }
+async function api(path, opts={}){
+  opts.headers = Object.assign({'Content-Type':'application/json','x-lab-pin':pin()}, opts.headers||{});
+  const r = await fetch(path, opts);
+  if(r.status===401){ const p = prompt('Keeper PIN:'); if(p!==null){ localStorage.setItem('lab-pin',p.trim()); return api(path,opts);} }
+  return r;
+}
+async function start(){
+  const topic = $('topic').value.trim();
+  if(!topic) return;
+  $('err').classList.remove('on');
+  const r = await api('/api/session',{method:'POST',body:JSON.stringify({topic})});
+  if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); }
+  lastLen = 0; $('feed').innerHTML='';
+}
+async function kill(){ await api('/api/kill',{method:'POST'}); }
+function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function poll(){
+  try{
+    const r = await api('/api/state');
+    if(!r.ok) return;
+    const s = await r.json();
+    // council avatars
+    if(!$('council').dataset.built){
+      $('council').innerHTML = s.agents.map(a=>`<div class="bird" id="bird-${a.name}" style="color:${a.color}"><div class="av">${a.emoji}</div><div class="nm">${a.name}</div></div>`).join('');
+      $('council').dataset.built = 1;
+    }
+    // meters
+    $('capT').textContent = s.caps.turns;
+    $('capU').textContent = s.usage.calls + '/' + s.caps.daily;
+    // status
+    const talking = s.running ? s.transcript[s.transcript.length-1] : null;
+    document.querySelectorAll('.bird').forEach(b=>b.classList.remove('talking'));
+    if(s.running){
+      $('status').innerHTML = '<span class="live">● in session</span> — turn '+s.turn+'/'+s.caps.turns+' · '+esc(s.topic);
+      const next = s.agents[s.transcript.length % s.agents.length];
+      const el = document.getElementById('bird-'+next.name); if(el) el.classList.add('talking');
+    } else if(s.killed){ $('status').innerHTML = '<span class="dead">⛔ killed by the keeper</span>'; }
+    else if(s.done && s.transcript.length){ $('status').textContent = 'session complete — notebook updated'; }
+    else if(!s.brain){ $('status').innerHTML = '<span class="dead">no brain connected</span> — set the API key'; }
+    else { $('status').textContent = 'standing by'; }
+    if(s.error){ $('err').textContent = s.error; $('err').classList.add('on'); }
+    // transcript
+    if(s.transcript.length > lastLen){
+      for(let i=lastLen;i<s.transcript.length;i++){
+        const m = s.transcript[i];
+        const d = document.createElement('div');
+        d.className='msg'; d.style.borderLeftColor = m.color;
+        d.innerHTML = `<div class="who" style="color:${m.color}">${m.emoji} ${esc(m.name)}</div><div class="txt">${esc(m.text)}</div>`;
+        $('feed').appendChild(d);
+      }
+      lastLen = s.transcript.length;
+      window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
+    }
+    if(s.done && !s.running){
+      const nb = await api('/api/notebook'); $('nbtext').textContent = await nb.text();
+    }
+  }catch(e){}
+}
+setInterval(poll, 1200); poll();
+api('/api/notebook').then(r=>r.text()).then(t=>$('nbtext').textContent=t);
+</script>
+</body>
+</html>

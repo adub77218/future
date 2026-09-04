@@ -1,0 +1,9 @@
+{
+  "name": "the-aviary",
+  "version": "1.0.0",
+  "description": "AI council lab — agents talk, the keeper watches, laws hold",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "@anthropic-ai/sdk": "^0.32.1", "express": "^4.19.2" }
+}
