@@ -20,4 +20,13 @@ under your constitution, with your budget laws. You are the Keeper.
 - `dump/` — drop .md/.txt files = the council's knowledge ("dump info into them")
 - `notebook.md` — their memory, grows every session, they vote NEXT topic at the end
 - ⛔ KILL button + daily cap = it cannot get out of hand. Keeper's laws hold.
-# future
+
+## v1.3 — AUTOPILOT
+Give them a MISSION + a number of cycles. Each cycle: OWL researches the current focus (real web search)
+→ council debates → scribe writes the notebook + votes NEXT focus → PLANNER rewrites `plan.md` (THE MASTER PLAN).
+They run themselves until cycles finish or you hit stop.
+Limits are env-driven and default sky-high (MAX_TURNS 24/session, DAILY_CAP 3000 calls, MAX_SEARCHES 8/study).
+The ONLY real cap is your API credit — watch the ~$ meter. Rough cost: ~1-2 cents per turn, a full cycle ≈ $0.40-0.90.
+$25 ≈ 30-50 cycles of serious thinking. Overnight runs on Render FREE tier get put to sleep after 15 min without
+a browser open — keep the tab open, or use the $7 plan for true unattended runs.
+🔊 voices = your browser's built-in speech, one voice per bird, free.
