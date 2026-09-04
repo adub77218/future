@@ -38,6 +38,7 @@
   <div id="thinking" style="display:none;font-size:13px;color:#999;padding:12px 0"></div>
   <button id="more" onclick="more()" style="display:none;margin-top:14px;background:#F2F2F2;color:#333;padding:10px 16px">keep going →</button>
   <details open><summary>📄 the master plan (rewritten every cycle)</summary><pre id="plan">…</pre></details>
+  <details><summary>🛠️ workshop (what they've built) — <a href="/api/workshop.zip" style="color:#888">download bundle</a></summary><pre id="ws">…</pre></details>
   <details><summary>notebook (their memory)</summary><pre id="nb">…</pre></details>
   <details><summary>library (what they've learned)</summary><pre id="lib">…</pre></details>
 </div>
@@ -88,6 +89,7 @@ async function studyGo(){
   $('topic').placeholder='say something to them…'; $('go').textContent='say';
 }
 async function loadPlan(){ try{ const r = await api('/api/plan'); $('plan').textContent = await r.text(); }catch(e){} }
+async function loadWs(){ try{ const r = await api('/api/workshop'); const f = await r.json(); $('ws').innerHTML = f.length? f.map(x=>'<a href="/api/workshop/file?p='+encodeURIComponent(x)+'" target="_blank" style="color:#333">'+x+'</a>').join('\n') : '(empty — nothing built yet)'; }catch(e){} }
 async function loadLib(){ try{ const r = await api('/api/dump'); const f = await r.json(); $('lib').textContent = f.length? f.join('\n') : '(empty)'; }catch(e){} }
 async function autoGo(){
   const m = $('mission').value.trim(); if(!m) return;
@@ -100,7 +102,7 @@ async function autoGo(){
 }
 /* ---- voices (browser TTS, free) ---- */
 let voiceOn = false; const spoken = new Set(); let queue = [];
-const VOICE = { forge:{pitch:0.85,rate:1.05}, razor:{pitch:1.15,rate:1.0}, magpie:{pitch:1.35,rate:1.12}, owl:{pitch:0.7,rate:0.92}, keeper:{pitch:1,rate:1} };
+const VOICE = { anvil:{pitch:0.95,rate:1.15}, forge:{pitch:0.85,rate:1.05}, razor:{pitch:1.15,rate:1.0}, magpie:{pitch:1.35,rate:1.12}, owl:{pitch:0.7,rate:0.92}, keeper:{pitch:1,rate:1} };
 function toggleVoice(){ voiceOn=!voiceOn; $('voice').textContent = voiceOn?'🔊':'🔇'; if(voiceOn){ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance('voices on'); speechSynthesis.speak(u);} else speechSynthesis.cancel(); }
 function pickVoiceFor(agent){
   const vs = speechSynthesis.getVoices().filter(v=>v.lang.startsWith('en'));
@@ -134,7 +136,7 @@ async function poll(){
         const m = s.transcript[i];
         const d = document.createElement('div');
         d.className='msg';
-        d.innerHTML = '<div class="who" style="color:'+m.color+'">'+esc(m.name.toLowerCase())+'</div><div class="txt">'+esc(m.text)+'</div>';
+        d.innerHTML = '<div class="who" style="color:'+m.color+'">'+esc(m.name.toLowerCase())+(m.files&&m.files.length?' <span style="color:#2E6B36;font-weight:400">· shipped '+m.files.map(esc).join(', ')+'</span>':'')+'</div><div class="txt">'+esc(m.text)+'</div>';
         $('feed').appendChild(d);
         speak(m);
       }
@@ -160,7 +162,7 @@ async function poll(){
   }catch(e){}
 }
 setInterval(poll, 500); poll();
-api('/api/notebook').then(r=>r.text()).then(t=>$('nb').textContent=t); loadLib(); loadPlan();
+api('/api/notebook').then(r=>r.text()).then(t=>$('nb').textContent=t); loadLib(); loadPlan(); loadWs();
 </script>
 </body>
 </html>

@@ -30,3 +30,10 @@ The ONLY real cap is your API credit — watch the ~$ meter. Rough cost: ~1-2 ce
 $25 ≈ 30-50 cycles of serious thinking. Overnight runs on Render FREE tier get put to sleep after 15 min without
 a browser open — keep the tab open, or use the $7 plan for true unattended runs.
 🔊 voices = your browser's built-in speech, one voice per bird, free.
+
+## v1.4 — HANDS
+- 🛠️ ANVIL joins: the engineer who ships real files.
+- Any bird can write files with a ```file:path``` block → lands in `workshop/` on the server → listed on the page,
+  readable per-file, downloadable as one bundle (paste into Cursor to run/test — the Keeper executes, birds never run code).
+- Law 9: research before money. Law 10: build, don't just talk.
+- FREE MISSION: give autopilot the mission "choose your own" (see command below) and the council picks what to build.

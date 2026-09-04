@@ -19,6 +19,38 @@ const DAILY_CALL_CAP = Number(process.env.DAILY_CAP || 3000);
 const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 900);
 const MAX_SEARCHES_PER_STUDY = Number(process.env.MAX_SEARCHES || 8);
 const PLAN = path.join(__dirname, 'plan.md');
+const WORKSHOP = path.join(__dirname, 'workshop');
+const MAX_FILE_BYTES = 60000;
+async function harvestFiles(text, author) {
+  // parse ```file:relative/path.ext ... ``` blocks and write them into the workshop
+  const re = /```file:([^\n`]+)\n([\s\S]*?)```/g;
+  let m, written = [];
+  while ((m = re.exec(text))) {
+    let rel = m[1].trim().replace(/\\/g, '/').replace(/^\/+/, '');
+    if (rel.includes('..') || !/^[\w\-./ ]+$/.test(rel)) continue;
+    const full = path.join(WORKSHOP, rel);
+    if (!full.startsWith(WORKSHOP)) continue;
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, m[2].slice(0, MAX_FILE_BYTES), 'utf8');
+    written.push(rel);
+  }
+  if (written.length) {
+    await fsp.appendFile(path.join(WORKSHOP, 'BUILD-LOG.md'), `\n- ${new Date().toLocaleString()} — ${author} wrote: ${written.join(', ')}`);
+  }
+  return written;
+}
+async function workshopList() {
+  const out = [];
+  async function walk(dir, rel) {
+    let ents = []; try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const r = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) await walk(path.join(dir, e.name), r); else out.push(r);
+    }
+  }
+  await walk(WORKSHOP, '');
+  return out.sort();
+}
 const EST_COST_PER_CALL = 0.012; // rough $ estimate per model call at these sizes (searches ~+0.01 each)
 
 const DATA = path.join(__dirname, 'data');
@@ -90,7 +122,8 @@ const TEST_LINES = [
   "Strange connection: birds build nests from whatever's nearby. What if we treat the dump files as twigs — every idea must cite one?",
   "Then let's make it law-adjacent: proposals must reference the dump. I'll draft the session format: cite → propose → defend.",
   "That survives me. Citation forces grounding. I flag one cost: thin dumps make thin ideas. The Keeper must feed us well.",
-  "History rhyme: monasteries copied manuscripts before universities existed. We're copying the Keeper's library into something alive."
+  "History rhyme: monasteries copied manuscripts before universities existed. We're copying the Keeper's library into something alive.",
+  "ANVIL shipping the scaffold now.\n```file:scoreboard/index.js\n// idea scoreboard — TEST MODE scaffold\nconst ideas = [];\nmodule.exports = { add: (t) => ideas.push({ t, score: 0 }), list: () => ideas };\n```\nKeeper: run `node -e \"console.log(require('./scoreboard'))\"` to smoke it."
 ];
 async function callAgent(messages, system, onDelta) {
   if (TEST) {
@@ -137,6 +170,7 @@ async function runTurns(turns) {
         `\n== THE DUMP (knowledge the Keeper fed you) ==\n${digest}`,
         `\n== SESSION TOPIC ==\n${state.topic}`,
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
+        `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
         `\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
@@ -145,7 +179,8 @@ async function runTurns(turns) {
       const text = await callAgent(convo, system, (acc) => { if (state.partial) state.partial.text = acc; });
       await bumpUsage();
       state.partial = null; state.speaking = null;
-      state.transcript.push({ agent: agent.id, name: agent.name, emoji: agent.emoji, color: agent.color, text, t: Date.now() });
+      const files = await harvestFiles(text, agent.name);
+      state.transcript.push({ agent: agent.id, name: agent.name, emoji: agent.emoji, color: agent.color, text, t: Date.now(), files });
       state.turn++;
       agent = pickNext(text, agent.id);
     }
@@ -195,7 +230,7 @@ async function planText() {
 async function rewritePlan() {
   state.speaking = 'planner';
   const prev = await planText();
-  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper (17, farm kid, coder, AI major bound) does THIS WEEK\n## Open questions for the next study cycle\nMark unverified claims with [unverified]. Be concrete, no fluff.';
+  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper (17, farm kid, coder, AI major bound) does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\nMark unverified claims with [unverified]. Be concrete, no fluff.';
   const convo = [{ role: 'user', content: `MISSION: ${state.mission}\n\nPREVIOUS PLAN:\n${prev.slice(0, 6000)}\n\nTHIS CYCLE'S TRANSCRIPT:\n${state.transcript.map(x => x.name + ': ' + x.text).join('\n\n').slice(0, 14000)}\n\nRewrite THE MASTER PLAN in full.` }];
   let text;
   try {
@@ -265,6 +300,21 @@ app.post('/api/autopilot', (req, res) => {
   res.json({ ok: true });
 });
 app.get('/api/plan', async (_req, res) => res.type('text/plain').send(await planText()));
+app.get('/api/workshop', async (_req, res) => res.json(await workshopList()));
+app.get('/api/workshop/file', async (req, res) => {
+  const rel = String(req.query.p || '').replace(/\\/g, '/');
+  if (rel.includes('..') || !rel) return res.status(400).send('bad path');
+  const full = path.join(WORKSHOP, rel);
+  if (!full.startsWith(WORKSHOP)) return res.status(400).send('bad path');
+  try { res.type('text/plain').send(await fsp.readFile(full, 'utf8')); } catch { res.status(404).send('not found'); }
+});
+app.get('/api/workshop.zip', async (_req, res) => {
+  // simple tar-less bundle: concatenate files with headers (Keeper copies into Cursor)
+  const files = await workshopList(); let out = '';
+  for (const f of files) { try { out += `\n\n===== FILE: ${f} =====\n` + await fsp.readFile(path.join(WORKSHOP, f), 'utf8'); } catch {} }
+  res.setHeader('Content-Disposition', 'attachment; filename="workshop-bundle.txt"');
+  res.type('text/plain').send(out || '(workshop empty)');
+});
 app.get('/api/dump', async (_req, res) => {
   try {
     const dir = path.join(__dirname, 'dump');
