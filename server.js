@@ -16,7 +16,7 @@ const MODEL = process.env.AVIARY_MODEL || 'claude-sonnet-4-5-20250929';
 // ---- THE BUDGET LAWS ----
 const MAX_TURNS_PER_SESSION = Number(process.env.MAX_TURNS || 24);
 const DAILY_CALL_CAP = Number(process.env.DAILY_CAP || 3000);
-const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 900);
+const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 4000);
 const MAX_SEARCHES_PER_STUDY = Number(process.env.MAX_SEARCHES || 8);
 const PLAN = path.join(__dirname, 'plan.md');
 const WORKSHOP = path.join(__dirname, 'workshop');
@@ -28,6 +28,7 @@ async function harvestFiles(text, author) {
   while ((m = re.exec(text))) {
     let rel = m[1].trim().replace(/\\/g, '/').replace(/^\/+/, '');
     if (rel.includes('..') || !/^[\w\-./ ]+$/.test(rel)) continue;
+    if (/^path\/|example|placeholder|your-file/i.test(rel) || /\(complete contents\)|\(ship working code\)/i.test(m[2])) continue;
     const full = path.join(WORKSHOP, rel);
     if (!full.startsWith(WORKSHOP)) continue;
     await fsp.mkdir(path.dirname(full), { recursive: true });
@@ -141,14 +142,23 @@ async function callAgent(messages, system, onDelta) {
 }
 
 // ---- the session loop ----
+let roundSpoken = new Set();
 function pickNext(lastText, lastAgentId) {
-  // if the last speaker addressed someone by name, pass them the mic; else round-robin
-  if (lastText) {
-    for (const a of AGENTS) if (a.id !== lastAgentId && new RegExp('\\b' + a.name + '\\b', 'i').test(lastText)) return a;
-  }
   const ring = AGENTS.filter(a => !a.researcher);
+  if (lastAgentId) roundSpoken.add(lastAgentId);
+  if (ring.every(a => roundSpoken.has(a.id))) roundSpoken = new Set(); // new round: everyone eligible again
+  const eligible = ring.filter(a => !roundSpoken.has(a.id));
+  // pass the mic by name ONLY to someone who hasn't spoken this round (OWL may be summoned once per round)
+  if (lastText) {
+    for (const a of AGENTS) {
+      if (a.id === lastAgentId) continue;
+      if (roundSpoken.has(a.id)) continue;
+      if (new RegExp('\\b' + a.name + '\\b', 'i').test(lastText)) { if (a.researcher) roundSpoken.add(a.id); return a; }
+    }
+  }
   const idx = ring.findIndex(a => a.id === lastAgentId);
-  return ring[(idx + 1) % ring.length];
+  for (let i = 1; i <= ring.length; i++) { const c = ring[(idx + i) % ring.length]; if (eligible.includes(c)) return c; }
+  return eligible[0] || ring[0];
 }
 
 async function runTurns(turns) {
@@ -156,7 +166,8 @@ async function runTurns(turns) {
   try {
     const digest = await dumpDigest();
     const nb = await notebookText();
-    let last = state.transcript.filter(x => x.agent !== 'keeper').slice(-1)[0];
+    roundSpoken = new Set();
+  let last = state.transcript.filter(x => x.agent !== 'keeper').slice(-1)[0];
     let agent = last ? pickNext(last.text, last.agent) : AGENTS.filter(a => !a.researcher)[0];
     for (let t = 0; t < turns; t++) {
       if (state.killed) break;
@@ -174,7 +185,7 @@ async function runTurns(turns) {
         `\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
-      convo.push({ role: 'user', content: state.transcript.length ? `Your turn, ${agent.name}. Respond to the room.` : `You open the session, ${agent.name}. Address the topic.` });
+      convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
       state.partial = { agent: agent.id, name: agent.name, color: agent.color, text: '' };
       const text = await callAgent(convo, system, (acc) => { if (state.partial) state.partial.text = acc; });
       await bumpUsage();
@@ -230,11 +241,11 @@ async function planText() {
 async function rewritePlan() {
   state.speaking = 'planner';
   const prev = await planText();
-  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper (17, farm kid, coder, AI major bound) does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\nMark unverified claims with [unverified]. Be concrete, no fluff.';
+  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper (17, farm kid, coder, AI major bound) does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\n## STATUS\nThe very last line of the document must be exactly `STATUS: IN PROGRESS` or `STATUS: COMPLETE`. Declare COMPLETE only when ALL are true: (1) a runnable product exists in the workshop with a README the Keeper can follow, (2) a concrete first-10-customers plan is written, (3) a list of what needs a human is written, (4) RAZOR has failed to kill the plan in the latest cycle. Otherwise IN PROGRESS. Mark unverified claims with [unverified]. Be concrete, no fluff.';
   const convo = [{ role: 'user', content: `MISSION: ${state.mission}\n\nPREVIOUS PLAN:\n${prev.slice(0, 6000)}\n\nTHIS CYCLE'S TRANSCRIPT:\n${state.transcript.map(x => x.name + ': ' + x.text).join('\n\n').slice(0, 14000)}\n\nRewrite THE MASTER PLAN in full.` }];
   let text;
   try {
-    if (TEST) { text = `# THE PLAN — ${state.mission}\n## Thesis\n(TEST MODE) Cycle ${state.cycle}: the council believes geothermal-first, fusion-later.\n## What the Keeper does THIS WEEK\n- ship the seismic predictor prototype [unverified]`; }
+    if (TEST) { text = `# THE PLAN — ${state.mission}\n## Thesis\n(TEST MODE) Cycle ${state.cycle}.\n## What the Keeper does THIS WEEK\n- run the workshop bundle\n\nSTATUS: ${state.cycle >= 3 ? 'COMPLETE' : 'IN PROGRESS'}`; }
     else { const out = await anthropic.messages.create({ model: MODEL, max_tokens: 3000, system: sys, messages: convo }); text = (out.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim(); }
     await bumpUsage();
     await fsp.writeFile(PLAN, text, 'utf8');
@@ -249,18 +260,28 @@ async function nextSubtopic() {
 }
 async function autopilot(mission, cycles) {
   state.mission = mission; state.cycles = cycles; state.cycle = 0; state.autopilot = true; state.killed = false; state.error = null;
-  for (let c = 1; c <= cycles; c++) {
+  let failures = 0;
+  for (let c = 1; cycles === 0 || c <= cycles; c++) {
     if (state.killed) break;
     state.cycle = c;
     const sub = c === 1 ? mission : await nextSubtopic();
-    state.topic = `[cycle ${c}/${cycles}] ${sub}`; state.turn = 0; state.transcript = [];
-    state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '🛰️', color: '#888', text: `Cycle ${c} of ${cycles}. Mission: ${mission}\nThis cycle's focus: ${sub}`, t: Date.now() });
+    state.topic = `[cycle ${c}/${cycles || '∞'}] ${sub}`; state.turn = 0; state.transcript = [];
+    state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '🛰️', color: '#888', text: `Cycle ${c}${cycles ? ' of ' + cycles : ' (running until DONE)'}. Mission: ${mission}\nThis cycle's focus: ${sub}`, t: Date.now() });
     state.running = true; state.done = false;
     try { await study(sub); } catch (e) { state.error = 'OWL could not research: ' + String(e.message || e); }
     if (state.killed) break;
     await runTurns(MAX_TURNS_PER_SESSION);
     if (state.killed) break;
     await rewritePlan();
+    // hard stops: credit gone / repeated failures
+    if (state.error && /credit|billing|insufficient|invalid.*key|authentication/i.test(state.error)) { state.error = 'STOPPED: ' + state.error + ' — add credit / check the key, then relaunch.'; break; }
+    if (state.error) { failures++; if (failures >= 3) { state.error = 'STOPPED after 3 failing cycles: ' + state.error; break; } } else failures = 0;
+    // completion: the planner declares it
+    const plan = await planText();
+    if (/^STATUS:\s*COMPLETE/mi.test(plan)) {
+      state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '🏁', color: '#888', text: `MISSION COMPLETE — declared by the planner after cycle ${c}. Read the master plan and the workshop.`, t: Date.now() });
+      break;
+    }
   }
   state.autopilot = false; state.running = false; state.done = true;
 }
@@ -278,7 +299,7 @@ async function runSession(topic) {
 // ---- endpoints ----
 app.post('/api/session', (req, res) => {
   if (state.running) return res.status(409).json({ error: 'a session is already running' });
-  const topic = String((req.body || {}).topic || '').slice(0, 300).trim();
+  const topic = String((req.body || {}).topic || '').slice(0, 4000).trim();
   if (!topic) return res.status(400).json({ error: 'give the council a topic' });
   runSession(topic); // async, not awaited
   res.json({ ok: true });
@@ -286,15 +307,15 @@ app.post('/api/session', (req, res) => {
 app.post('/api/kill', (req, res) => { state.killed = true; res.json({ ok: true }); });
 app.post('/api/study', (req, res) => {
   if (state.running) return res.status(409).json({ error: 'a session is already running' });
-  const topic = String((req.body || {}).topic || '').slice(0, 300).trim();
+  const topic = String((req.body || {}).topic || '').slice(0, 4000).trim();
   if (!topic) return res.status(400).json({ error: 'give OWL something to study' });
   runStudySession(topic);
   res.json({ ok: true });
 });
 app.post('/api/autopilot', (req, res) => {
   if (state.running) return res.status(409).json({ error: 'a session is already running' });
-  const mission = String((req.body || {}).mission || '').slice(0, 500).trim();
-  const cycles = Math.max(1, Math.min(200, Number((req.body || {}).cycles) || 5));
+  const mission = String((req.body || {}).mission || '').slice(0, 4000).trim();
+  const cycles = Math.max(0, Math.min(1000, Number((req.body || {}).cycles) || 0)); // 0 = until DONE
   if (!mission) return res.status(400).json({ error: 'give them a mission' });
   autopilot(mission, cycles);
   res.json({ ok: true });

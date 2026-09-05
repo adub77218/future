@@ -45,7 +45,7 @@
 <div id="bar">
   <div class="in" id="autorow" style="margin-bottom:8px">
     <input id="mission" placeholder="mission for autopilot… (e.g. a billion-dollar AI-energy plan and how to execute it)" style="flex:1;border:1px solid #DDD;border-radius:8px;padding:12px;font:15px inherit;outline:none">
-    <input id="cycles" type="number" value="5" min="1" max="200" style="width:64px;border:1px solid #DDD;border-radius:8px;padding:12px 8px;font:15px inherit;outline:none" title="cycles">
+    <input id="cycles" type="number" value="0" min="0" max="1000" placeholder="0=∞" style="width:64px;border:1px solid #DDD;border-radius:8px;padding:12px 8px;font:15px inherit;outline:none" title="cycles">
     <button id="auto" onclick="autoGo()" style="background:#2E2E2E;color:#fff">autopilot</button>
   </div>
   <div class="in">
@@ -93,7 +93,7 @@ async function loadWs(){ try{ const r = await api('/api/workshop'); const f = aw
 async function loadLib(){ try{ const r = await api('/api/dump'); const f = await r.json(); $('lib').textContent = f.length? f.join('\n') : '(empty)'; }catch(e){} }
 async function autoGo(){
   const m = $('mission').value.trim(); if(!m) return;
-  const c = Number($('cycles').value)||5;
+  const c = Number($('cycles').value)||0; // 0 = until done
   $('err').classList.remove('on');
   const r = await api('/api/autopilot',{method:'POST',body:JSON.stringify({mission:m, cycles:c})});
   if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); return; }
@@ -128,7 +128,7 @@ async function poll(){
     const s = await r.json();
     $('status').textContent = s.running ? ('thinking · turn '+s.turn+'/'+s.caps.turns)
       : s.killed ? 'stopped' : (!s.brain ? 'no brain — add the key' : (s.done && s.transcript.length ? 'done' : 'standing by'));
-    $('usage').textContent = 'today: '+s.usage.calls+' calls · ~$'+(s.spendEstimate||0).toFixed(2)+' est.' + (s.autopilot? ' · cycle '+s.cycle+'/'+s.cycles : '');
+    $('usage').textContent = 'today: '+s.usage.calls+' calls · ~$'+(s.spendEstimate||0).toFixed(2)+' est.' + (s.autopilot? ' · cycle '+s.cycle+'/'+(s.cycles||'∞') : '');
     $('meta').textContent = s.topic ? ('topic: '+s.topic) : '';
     if(s.error){ $('err').textContent = s.error; $('err').classList.add('on'); }
     if(s.transcript.length > lastLen){

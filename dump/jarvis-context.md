@@ -11,3 +11,5 @@ Asian-market wholesale). Key facts:
   morning brief, printable order sheet, outbox drafts (human taps to send).
 - Roadmap: text-line pipe (Twilio), email intake, invoicing, promotions room.
 - Motto: "Run the business from your phone."
+
+- TECH STACK (important for anyone building Jarvis features): Node.js + Express server (`server.js`), one single-file frontend (`public/index.html`, vanilla JS, no framework), books stored as JSON on the server, AI calls via the Anthropic SDK. New features must be Node/JS that plug into Express routes and that HTML file — not Python.
