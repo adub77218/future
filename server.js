@@ -137,9 +137,19 @@ async function dumpDigest() {
     return out.join('\n\n') || '(the dump is empty — no knowledge files yet)';
   } catch { return '(the dump is empty)'; }
 }
+function stripTestGhosts(txt) {
+  const blocks = txt.split(/(?=^## Session)/m);
+  const isGhost = (b) => /\(TEST MODE\)/.test(b) || TEST_LINES.some(l => b.includes(l.slice(0, 60)));
+  return blocks.filter(b => !isGhost(b)).join('').trim();
+}
 async function notebookText() {
-  try { return (await fsp.readFile(NOTEBOOK, 'utf8')).slice(-3000); }
+  try { const raw = await fsp.readFile(NOTEBOOK, 'utf8'); const clean = stripTestGhosts(raw); return clean ? clean.slice(-3000) : '(the notebook is blank — this is the council\'s first session)'; }
   catch { return '(the notebook is blank — this is the council\'s first session)'; }
+}
+async function purgeTestGhosts() {
+  if (TEST) return;
+  try { const raw = await fsp.readFile(NOTEBOOK, 'utf8'); const clean = stripTestGhosts(raw); if (clean !== raw.trim()) { await fsp.writeFile(NOTEBOOK, clean, 'utf8'); console.log('notebook: purged test-mode ghosts'); } } catch {}
+  try { const p = await fsp.readFile(PLAN, 'utf8'); if (/TEST MODE/.test(p)) { await fsp.unlink(PLAN); console.log('plan: purged test-mode ghost'); } } catch {}
 }
 
 // ---- the model call ----
@@ -250,7 +260,7 @@ async function runTurns(turns) {
       let entry;
       try { entry = await callAgent(convo, summarySys); await bumpUsage(); }
       catch { entry = '(scribe unavailable this session)'; }
-      await fsp.appendFile(NOTEBOOK, `\n\n## Session — ${new Date().toLocaleString()}\nTopic: ${state.topic}\n${entry}\n`);
+      await fsp.appendFile(NOTEBOOK, `\n\n## Session${TEST ? ' (TEST MODE)' : ''} — ${new Date().toLocaleString()}\nTopic: ${state.topic}\n${entry}\n`);
       state.speaking = null;
     }
   } catch (e) {
@@ -424,4 +434,4 @@ app.get('/api/notebook', async (_req, res) => {
 });
 app.get('/health', (_req, res) => res.json({ ok: true, brain: !!anthropic || TEST, test: TEST }));
 
-app.listen(PORT, () => console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`));
+app.listen(PORT, () => { purgeTestGhosts(); console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });

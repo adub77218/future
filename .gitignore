@@ -1,7 +1,12 @@
-﻿node_modules/
+node_modules/
 data/
 .env
 *.env
 .env.*
 
 *.log
+# memory files
+notebook.md
+plan.md
+workshop/
+dump/learned-*.md
