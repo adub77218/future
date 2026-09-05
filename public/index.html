@@ -31,7 +31,7 @@
 </head>
 <body>
 <div id="wrap">
-  <h1>the aviary <span class="st"><span id="status">standing by</span> · <a href="#" onclick="newTopic();return false" style="color:#999">new topic</a></span></h1>
+  <h1>the aviary <span class="st"><span id="status">standing by</span> · <a href="#" onclick="newTopic();return false" style="color:#999">new topic</a> · <a href="#" onclick="wipe();return false" style="color:#999">wipe memory</a></span></h1>
   <div id="err"></div>
   <div id="feed"></div>
   <div class="msg" id="live" style="display:none"><div class="who" id="livewho"></div><div class="txt" id="livetxt"></div></div>
@@ -43,19 +43,15 @@
   <details><summary>library (what they've learned)</summary><pre id="lib">…</pre></details>
 </div>
 <div id="bar">
-  <div class="in" id="autorow" style="margin-bottom:8px">
-    <input id="mission" placeholder="mission for autopilot… (e.g. a billion-dollar AI-energy plan and how to execute it)" style="flex:1;border:1px solid #DDD;border-radius:8px;padding:12px;font:15px inherit;outline:none">
-    <input id="cycles" type="number" value="0" min="0" max="1000" placeholder="0=∞" style="width:64px;border:1px solid #DDD;border-radius:8px;padding:12px 8px;font:15px inherit;outline:none" title="cycles">
-    <button id="auto" onclick="autoGo()" style="background:#2E2E2E;color:#fff">autopilot</button>
-  </div>
   <div class="in">
-    <input id="topic" placeholder="give them something to think about…">
-    <button id="go" onclick="start()">go</button>
-    <button id="studybtn" onclick="studyGo()" title="OWL researches first, then the council debates with real sources">study</button>
+    <input id="topic" placeholder="give them a mission… (they research first, then build until done)">
+    <input id="cycles" type="number" value="0" min="0" max="1000" placeholder="∞" title="cycles (0 = until done)" style="width:56px;border:1px solid #DDD;border-radius:8px;padding:12px 6px;font:15px inherit;outline:none">
+    <button id="go" onclick="start()">start</button>
+    <button id="studybtn" onclick="studyGo()" title="one research + one debate, no autopilot">study</button>
     <button id="stop" onclick="kill()">stop</button>
     <button id="voice" onclick="toggleVoice()" style="background:#F2F2F2;color:#333">🔇</button>
   </div>
-  <div id="note"><span id="meta"></span><span id="usage"></span></div>
+  <div id="note"><span id="meta"></span><span><a href="#" onclick="chatGo();return false" style="color:#BBB" title="plain session, no research, no autopilot">just chat</a> · <span id="usage"></span></span></div>
 </div>
 <script>
 const $ = id => document.getElementById(id);
@@ -67,39 +63,37 @@ async function api(p, o={}){
   if(r.status===401){ const v = prompt('PIN:'); if(v!==null){ localStorage.setItem('lab-pin', v.trim()); return api(p,o); } }
   return r;
 }
-let hasSession = false;
+let running = false;
 async function start(){
   const t = $('topic').value.trim(); if(!t) return;
   $('err').classList.remove('on');
-  if(hasSession){ // talk INTO the room
+  if(running){ // talk INTO the room while they work
     await api('/api/say',{method:'POST',body:JSON.stringify({text:t})});
     $('topic').value=''; return;
   }
+  // idle: this is a MISSION -> autopilot (research first, build until done)
+  const c = Number($('cycles').value)||0;
+  const r = await api('/api/autopilot',{method:'POST',body:JSON.stringify({mission:t, cycles:c})});
+  if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); return; }
+  $('feed').innerHTML=''; lastLen=0; $('topic').value='';
+}
+async function chatGo(){
+  const t = $('topic').value.trim(); if(!t){ alert('type a topic first'); return; }
   const r = await api('/api/session',{method:'POST',body:JSON.stringify({topic:t})});
   if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); return; }
-  $('feed').innerHTML=''; lastLen=0; $('topic').value=''; hasSession=true;
-  $('topic').placeholder='say something to them…'; $('go').textContent='say';
+  $('feed').innerHTML=''; lastLen=0; $('topic').value='';
 }
 async function studyGo(){
   const t = $('topic').value.trim(); if(!t) return;
   $('err').classList.remove('on');
   const r = await api('/api/study',{method:'POST',body:JSON.stringify({topic:t})});
   if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); return; }
-  $('feed').innerHTML=''; lastLen=0; $('topic').value=''; hasSession=true;
+  $('feed').innerHTML=''; lastLen=0; $('topic').value='';
   $('topic').placeholder='say something to them…'; $('go').textContent='say';
 }
 async function loadPlan(){ try{ const r = await api('/api/plan'); $('plan').textContent = await r.text(); }catch(e){} }
 async function loadWs(){ try{ const r = await api('/api/workshop'); const f = await r.json(); $('ws').innerHTML = f.length? f.map(x=>'<a href="/api/workshop/file?p='+encodeURIComponent(x)+'" target="_blank" style="color:#333">'+x+'</a>').join('\n') : '(empty — nothing built yet)'; }catch(e){} }
 async function loadLib(){ try{ const r = await api('/api/dump'); const f = await r.json(); $('lib').textContent = f.length? f.join('\n') : '(empty)'; }catch(e){} }
-async function autoGo(){
-  const m = $('mission').value.trim(); if(!m) return;
-  const c = Number($('cycles').value)||0; // 0 = until done
-  $('err').classList.remove('on');
-  const r = await api('/api/autopilot',{method:'POST',body:JSON.stringify({mission:m, cycles:c})});
-  if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); return; }
-  $('feed').innerHTML=''; lastLen=0; hasSession=true;
-  $('topic').placeholder='say something to them…'; $('go').textContent='say';
-}
 /* ---- voices (browser TTS, free) ---- */
 let voiceOn = false; const spoken = new Set(); let queue = [];
 const VOICE = { anvil:{pitch:0.95,rate:1.15}, forge:{pitch:0.85,rate:1.05}, razor:{pitch:1.15,rate:1.0}, magpie:{pitch:1.35,rate:1.12}, owl:{pitch:0.7,rate:0.92}, keeper:{pitch:1,rate:1} };
@@ -117,8 +111,15 @@ function speak(m){
   const v = pickVoiceFor(m.agent); if(v) u.voice=v;
   speechSynthesis.speak(u);
 }
+async function wipe(){
+  const nb = confirm('Wipe the NOTEBOOK (their memory) and the master PLAN? (workshop files stay)'); if(!nb) return;
+  const ws = confirm('ALSO delete the workshop (everything they built)? Cancel = keep the workshop.');
+  const r = await api('/api/reset',{method:'POST',body:JSON.stringify({notebook:true, plan:true, learned:true, workshop:ws})});
+  const d = await r.json().catch(()=>({})); alert(d.ok? 'wiped: '+d.wiped.join(', ') : (d.error||'could not wipe'));
+  $('feed').innerHTML=''; lastLen=0; newTopic(); loadPlan(); loadLib(); loadWs();
+}
 async function more(){ $('more').style.display='none'; await api('/api/continue',{method:'POST'}); }
-function newTopic(){ hasSession=false; $('topic').placeholder='give them something to think about…'; $('go').textContent='go'; }
+function newTopic(){ $('topic').value=''; $('topic').focus(); }
 document.addEventListener('keydown', e=>{ if(e.key==='Enter' && document.activeElement===$('topic')) start(); });
 async function kill(){ await api('/api/kill',{method:'POST'}); }
 function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -155,7 +156,9 @@ async function poll(){
       if(s.running && s.speaking){ $('thinking').textContent = (s.speaking==='scribe'?'the scribe is writing the notebook':s.speaking==='planner'?'the planner is rewriting the master plan':(s.speaking==='OWL'?'owl is researching':s.speaking.toLowerCase()+' is thinking'))+'…'; $('thinking').style.display='block'; }
       else $('thinking').style.display='none';
     }
-    if(s.topic && !hasSession && s.transcript.length){ hasSession=true; $('topic').placeholder='say something to them…'; $('go').textContent='say'; }
+    running = !!s.running;
+    if(running){ $('topic').placeholder='say something to them… (they will answer)'; $('go').textContent='say'; $('cycles').style.display='none'; }
+    else { $('topic').placeholder='give them a mission… (they research first, then build until done)'; $('go').textContent='start'; $('cycles').style.display=''; }
     $('more').style.display = (s.done && !s.running && s.transcript.length && !s.killed) ? 'inline-block' : 'none';
     if(s.done && !s.running){ const n = await api('/api/notebook'); $('nb').textContent = await n.text(); loadLib(); loadPlan(); }
     if(s.speaking===null && s.autopilot) loadPlan();

@@ -34,7 +34,10 @@ async function runInWorkshop(cmd) {
     const child = spawn('bash', ['-lc', cmd], { cwd: WORKSHOP, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8' } });
     let out = '';
     const cap = (d) => { out += d.toString(); if (out.length > 6000) out = out.slice(0, 6000) + '\n…[truncated]'; };
-    child.stdout.on('data', cap); child.stderr.on('data', cap);
+    let serverSeen = false;
+    const watch = (d) => { cap(d); if (!serverSeen && /listening|running on http|open on :|started on/i.test(out)) { serverSeen = true;
+      setTimeout(() => { child.kill('SIGKILL'); out += '\n[server started OK — stopped by the bench after 4s; that is a PASS for a web server]'; }, 4000); } };
+    child.stdout.on('data', watch); child.stderr.on('data', watch);
     const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[killed after ${RUN_TIMEOUT_MS / 1000}s]`; }, RUN_TIMEOUT_MS);
     child.on('close', (code) => { clearTimeout(timer); resolve(`$ ${cmd}\n${out.trim() || '(no output)'}\n[exit ${code}]`); });
   });
@@ -159,11 +162,24 @@ async function callAgent(messages, system, onDelta) {
     return line;
   }
   if (!anthropic) throw new Error('NO_KEY');
-  let acc = '';
-  const stream = anthropic.messages.stream({ model: MODEL, max_tokens: MAX_TOKENS_PER_TURN, system, messages });
-  stream.on('text', (t) => { acc += t; onDelta && onDelta(acc); });
-  await stream.finalMessage();
-  return acc.trim();
+  const waits = [4000, 15000, 40000];
+  for (let attempt = 0; attempt <= waits.length; attempt++) {
+    let acc = '';
+    try {
+      const stream = anthropic.messages.stream({ model: MODEL, max_tokens: MAX_TOKENS_PER_TURN, system, messages });
+      stream.on('text', (t) => { acc += t; onDelta && onDelta(acc); });
+      const fin = await stream.finalMessage();
+      if (!acc.trim() && attempt < waits.length) { await new Promise(r => setTimeout(r, waits[attempt])); continue; } // empty reply: breathe, retry
+      return acc.trim();
+    } catch (e) {
+      const msg = String(e && e.message || e);
+      const retryable = /429|rate|overloaded|529|ECONNRESET|socket|timeout/i.test(msg);
+      if (!retryable || attempt >= waits.length) throw e;
+      onDelta && onDelta((acc ? acc + '\n' : '') + `[rate limited — waiting ${waits[attempt] / 1000}s]`);
+      await new Promise(r => setTimeout(r, waits[attempt]));
+    }
+  }
+  return '';
 }
 
 // ---- the session loop ----
@@ -273,7 +289,7 @@ async function planText() {
 async function rewritePlan() {
   state.speaking = 'planner';
   const prev = await planText();
-  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper (17, farm kid, coder, AI major bound) does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\n## STATUS\nThe very last line of the document must be exactly `STATUS: IN PROGRESS` or `STATUS: COMPLETE`. Declare COMPLETE only when ALL are true: (1) a runnable product exists in the workshop with a README the Keeper can follow, (2) a concrete first-10-customers plan is written, (3) a list of what needs a human is written, (4) RAZOR has failed to kill the plan in the latest cycle. Otherwise IN PROGRESS. Mark unverified claims with [unverified]. Be concrete, no fluff.';
+  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\n## STATUS\nThe very last line of the document must be exactly `STATUS: IN PROGRESS` or `STATUS: COMPLETE`. Declare COMPLETE only when ALL are true: (1) a runnable product exists in the workshop with a README the Keeper can follow, (2) a concrete first-10-customers plan is written, (3) a list of what needs a human is written, (4) RAZOR has failed to kill the plan in the latest cycle. Otherwise IN PROGRESS. Mark unverified claims with [unverified]. Be concrete, no fluff.';
   const convo = [{ role: 'user', content: `MISSION: ${state.mission}\n\nPREVIOUS PLAN:\n${prev.slice(0, 6000)}\n\nTHIS CYCLE'S TRANSCRIPT:\n${state.transcript.map(x => x.name + ': ' + x.text).join('\n\n').slice(0, 14000)}\n\nRewrite THE MASTER PLAN in full.` }];
   let text;
   try {
@@ -353,6 +369,17 @@ app.post('/api/autopilot', (req, res) => {
   res.json({ ok: true });
 });
 app.get('/api/plan', async (_req, res) => res.type('text/plain').send(await planText()));
+app.post('/api/reset', async (req, res) => {
+  if (state.running) return res.status(409).json({ error: 'stop the session first' });
+  const what = req.body || {};
+  const done = [];
+  if (what.notebook) { await fsp.writeFile(NOTEBOOK, '', 'utf8'); done.push('notebook'); }
+  if (what.plan) { try { await fsp.unlink(PLAN); } catch {} done.push('plan'); }
+  if (what.workshop) { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
+  if (what.learned) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) if (/^learned-/.test(f)) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('learned notes'); }
+  state.transcript = []; state.topic = ''; state.mission = ''; state.done = false; state.cycle = 0;
+  res.json({ ok: true, wiped: done });
+});
 app.get('/api/workshop', async (_req, res) => res.json(await workshopList()));
 app.get('/api/workshop/file', async (req, res) => {
   const rel = String(req.query.p || '').replace(/\\/g, '/');
@@ -382,7 +409,7 @@ app.post('/api/continue', (req, res) => {
   res.json({ ok: true });
 });
 app.post('/api/say', (req, res) => {
-  const text = String((req.body || {}).text || '').slice(0, 1000).trim();
+  const text = String((req.body || {}).text || '').slice(0, 4000).trim();
   if (!text) return res.status(400).json({ error: 'say something' });
   state.transcript.push({ agent: 'keeper', name: 'KEEPER', emoji: '👤', color: '#1A1A1A', text, t: Date.now() });
   if (!state.running && state.topic) runTurns(Math.min(3, MAX_TURNS_PER_SESSION)); // wake them to answer you

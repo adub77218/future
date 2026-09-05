@@ -1,5 +1,5 @@
 # CONTEXT: JARVIS — the Keeper's company
-The Keeper (17, farm kid, founder) is building JARVIS: an AI office manager for family
+The Keeper — founder, coder, raised in the business — is building JARVIS: an AI office manager for family
 businesses. Customer #001 = his family's poultry farm (~$6M/yr, ducks/quail/balut,
 Asian-market wholesale). Key facts:
 - 90% of orders arrive as TEXTS to the owner's personal phone. Single point of failure.
