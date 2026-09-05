@@ -20,6 +20,30 @@ const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 4000);
 const MAX_SEARCHES_PER_STUDY = Number(process.env.MAX_SEARCHES || 8);
 const PLAN = path.join(__dirname, 'plan.md');
 const WORKSHOP = path.join(__dirname, 'workshop');
+const { spawn } = require('child_process');
+const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT || 60000);
+const MAX_RUNS_PER_TURN = 3;
+const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch)\b/;
+async function runInWorkshop(cmd) {
+  cmd = cmd.trim();
+  if (!ALLOWED.test(cmd)) return `[blocked] only node/npm/python/basic file commands are allowed: ${cmd}`;
+  if (/\.\.\/|\/etc\/|\/root|~|\$\(|`|\|\s*sh\b/.test(cmd)) return `[blocked] unsafe path or shell trick: ${cmd}`;
+  if (/^npm\s+(install|i)\b/.test(cmd) && !/--ignore-scripts/.test(cmd)) cmd += ' --ignore-scripts';
+  await fsp.mkdir(WORKSHOP, { recursive: true });
+  return new Promise((resolve) => {
+    const child = spawn('bash', ['-lc', cmd], { cwd: WORKSHOP, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8' } });
+    let out = '';
+    const cap = (d) => { out += d.toString(); if (out.length > 6000) out = out.slice(0, 6000) + '\n…[truncated]'; };
+    child.stdout.on('data', cap); child.stderr.on('data', cap);
+    const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[killed after ${RUN_TIMEOUT_MS / 1000}s]`; }, RUN_TIMEOUT_MS);
+    child.on('close', (code) => { clearTimeout(timer); resolve(`$ ${cmd}\n${out.trim() || '(no output)'}\n[exit ${code}]`); });
+  });
+}
+function harvestRuns(text) {
+  const re = /```run\n([\s\S]*?)```/g; let m, cmds = [];
+  while ((m = re.exec(text))) cmds.push(...m[1].split('\n').map(x => x.trim()).filter(x => x && !x.startsWith('#')));
+  return cmds.slice(0, MAX_RUNS_PER_TURN);
+}
 const MAX_FILE_BYTES = 60000;
 async function harvestFiles(text, author) {
   // parse ```file:relative/path.ext ... ``` blocks and write them into the workshop
@@ -124,6 +148,7 @@ const TEST_LINES = [
   "Then let's make it law-adjacent: proposals must reference the dump. I'll draft the session format: cite → propose → defend.",
   "That survives me. Citation forces grounding. I flag one cost: thin dumps make thin ideas. The Keeper must feed us well.",
   "History rhyme: monasteries copied manuscripts before universities existed. We're copying the Keeper's library into something alive.",
+  "Bench check.\n```run\nnode -e \"console.log('bench alive', 2+2)\"\nls\n```",
   "ANVIL shipping the scaffold now.\n```file:scoreboard/index.js\n// idea scoreboard — TEST MODE scaffold\nconst ideas = [];\nmodule.exports = { add: (t) => ideas.push({ t, score: 0 }), list: () => ideas };\n```\nKeeper: run `node -e \"console.log(require('./scoreboard'))\"` to smoke it."
 ];
 async function callAgent(messages, system, onDelta) {
@@ -167,7 +192,7 @@ async function runTurns(turns) {
     const digest = await dumpDigest();
     const nb = await notebookText();
     roundSpoken = new Set();
-  let last = state.transcript.filter(x => x.agent !== 'keeper').slice(-1)[0];
+  let last = state.transcript.filter(x => x.agent !== 'keeper' && x.agent !== 'host').slice(-1)[0];
     let agent = last ? pickNext(last.text, last.agent) : AGENTS.filter(a => !a.researcher)[0];
     for (let t = 0; t < turns; t++) {
       if (state.killed) break;
@@ -182,7 +207,7 @@ async function runTurns(turns) {
         `\n== SESSION TOPIC ==\n${state.topic}`,
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
         `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
-        `\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. Allowed: node, npm, python3, ls, cat, mkdir, cp. Read the results and fix what broke.\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
@@ -193,6 +218,13 @@ async function runTurns(turns) {
       const files = await harvestFiles(text, agent.name);
       state.transcript.push({ agent: agent.id, name: agent.name, emoji: agent.emoji, color: agent.color, text, t: Date.now(), files });
       state.turn++;
+      const cmds = harvestRuns(text);
+      for (const cmd of cmds) {
+        state.speaking = 'test bench';
+        const result = await runInWorkshop(cmd);
+        state.transcript.push({ agent: 'host', name: 'TEST BENCH', emoji: '🧪', color: '#666', text: result, t: Date.now() });
+      }
+      state.speaking = null;
       agent = pickNext(text, agent.id);
     }
     if (!state.killed && state.transcript.length) {
