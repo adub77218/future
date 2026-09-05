@@ -23,19 +23,47 @@ const WORKSHOP = path.join(__dirname, 'workshop');
 const { spawn } = require('child_process');
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT || 60000);
 const MAX_RUNS_PER_TURN = 3;
-const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch)\b/;
+const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch|sleep|curl|probe)\b/;
+async function probe(args, cwd) {
+  // probe <entry.js> <url> — boots a server, waits for it, fetches the url, prints the body, stops it
+  const [entry, url = 'http://localhost:3000/'] = args;
+  if (!entry) return '[probe] usage: probe server.js http://localhost:3000/api/x';
+  if (!/^https?:\/\/(localhost|127\.0\.0\.1)/.test(url)) return '[probe] only localhost urls';
+  return new Promise((resolve) => {
+    let out = `$ probe ${entry} ${url}\n`;
+    const child = spawn('node', [entry], { cwd, env: { PATH: process.env.PATH, HOME: cwd, LANG: 'C.UTF-8' } });
+    let done = false;
+    const finish = (extra) => { if (done) return; done = true; child.kill('SIGKILL'); resolve(out + extra); };
+    child.stdout.on('data', d => out += d); child.stderr.on('data', d => out += d);
+    child.on('exit', (code) => { if (!done) finish(`\n[server exited early with code ${code}]`); });
+    const tryFetch = async (attempt) => {
+      if (done) return;
+      try {
+        const r = await fetch(url); const body = (await r.text()).slice(0, 1500);
+        finish(`\n[probe] GET ${url} -> ${r.status}\n${body}\n[server stopped by the bench — PASS]`);
+      } catch (e) { if (attempt < 12) setTimeout(() => tryFetch(attempt + 1), 500); else finish(`\n[probe] could not reach ${url} after 6s: ${e.message}\n[FAIL]`); }
+    };
+    setTimeout(() => tryFetch(0), 800);
+    setTimeout(() => finish('\n[probe] timeout\n[FAIL]'), 15000);
+  });
+}
 async function runInWorkshop(cmd) {
   cmd = cmd.trim();
-  if (!ALLOWED.test(cmd)) return `[blocked] only node/npm/python/basic file commands are allowed: ${cmd}`;
+  let cwd = WORKSHOP;
+  const cdm = cmd.match(/^cd\s+([\w\-./]+)\s*&&\s*(.+)$/);   // allow: cd sub && <cmd>
+  if (cdm) { const sub = path.join(WORKSHOP, cdm[1]); if (!sub.startsWith(WORKSHOP)) return `[blocked] cd outside workshop`; cwd = sub; cmd = cdm[2].trim(); }
+  if (!ALLOWED.test(cmd)) return `[blocked] only node/npm/python/curl(localhost)/probe/basic file commands are allowed: ${cmd}`;
   if (/\.\.\/|\/etc\/|\/root|~|\$\(|`|\|\s*sh\b/.test(cmd)) return `[blocked] unsafe path or shell trick: ${cmd}`;
+  if (/^curl\b/.test(cmd) && !/https?:\/\/(localhost|127\.0\.0\.1)/.test(cmd)) return `[blocked] curl is localhost-only on the bench`;
+  if (/^probe\b/.test(cmd)) return probe(cmd.split(/\s+/).slice(1), cwd);
   if (/^npm\s+(install|i)\b/.test(cmd) && !/--ignore-scripts/.test(cmd)) cmd += ' --ignore-scripts';
   await fsp.mkdir(WORKSHOP, { recursive: true });
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', cmd], { cwd: WORKSHOP, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8' } });
+    const child = spawn('bash', ['-lc', cmd], { cwd, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8' } });
     let out = '';
     const cap = (d) => { out += d.toString(); if (out.length > 6000) out = out.slice(0, 6000) + '\n…[truncated]'; };
     let serverSeen = false;
-    const watch = (d) => { cap(d); if (!serverSeen && /listening|running on http|open on :|started on/i.test(out)) { serverSeen = true;
+    const watch = (d) => { cap(d); if (!serverSeen && /listening|running (on|at)|open on|started|http:\/\/localhost/i.test(out)) { serverSeen = true;
       setTimeout(() => { child.kill('SIGKILL'); out += '\n[server started OK — stopped by the bench after 4s; that is a PASS for a web server]'; }, 4000); } };
     child.stdout.on('data', watch); child.stderr.on('data', watch);
     const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[killed after ${RUN_TIMEOUT_MS / 1000}s]`; }, RUN_TIMEOUT_MS);
@@ -53,7 +81,7 @@ async function harvestFiles(text, author) {
   const re = /```file:([^\n`]+)\n([\s\S]*?)```/g;
   let m, written = [];
   while ((m = re.exec(text))) {
-    let rel = m[1].trim().replace(/\\/g, '/').replace(/^\/+/, '');
+    let rel = m[1].trim().replace(/\\/g, '/').replace(/^\/+/, '').replace(/^(workshop\/)+/i, '');
     if (rel.includes('..') || !/^[\w\-./ ]+$/.test(rel)) continue;
     if (/^path\/|example|placeholder|your-file/i.test(rel) || /\(complete contents\)|\(ship working code\)/i.test(m[2])) continue;
     const full = path.join(WORKSHOP, rel);
@@ -233,7 +261,7 @@ async function runTurns(turns) {
         `\n== SESSION TOPIC ==\n${state.topic}`,
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
         `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
-        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. Allowed: node, npm, python3, ls, cat, mkdir, cp. Read the results and fix what broke.\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). Read the results and fix what broke.\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
