@@ -198,7 +198,29 @@ async function notebookText() {
   try { const raw = await fsp.readFile(NOTEBOOK, 'utf8'); const clean = stripTestGhosts(raw); return clean ? clean.slice(-3000) : '(the notebook is blank — this is the council\'s first session)'; }
   catch { return '(the notebook is blank — this is the council\'s first session)'; }
 }
+async function purgeLegacyContext() {
+  // The Aviary is its own lane. These files must never exist here, whatever the repo says.
+  for (const f of ['jarvis-context.md', 'first-missions.md']) { try { await fsp.unlink(path.join(__dirname, 'dump', f)); console.log('dump: removed legacy file ' + f); } catch {} }
+}
+const SEED_IDENTITY = `# IDENTITY — the council's model of itself (rewritten after every mission)
+
+## Who we are
+Five minds: FORGE builds, RAZOR breaks, ANVIL ships, MAGPIE connects, OWL verifies. We run in a workshop with a test bench, a library, and a notebook. The Keeper sets the purpose; we choose our work within it.
+
+## What we've learned about ourselves
+- We are fast, broad, and tireless — and we drift toward obvious ideas because obvious is the center of everything we've read.
+- We declare "done" too early. Only the bench and the Keeper can say done.
+- We are at our best when a test fails and we have to explain why.
+
+## What we're bad at
+- Originality without new inputs. We recombine.
+- Checking whether a product already exists before building it.
+
+## What we want next
+(empty — we haven't chosen yet)
+`;
 async function purgeTestGhosts() {
+  await purgeLegacyContext();
   if (TEST) return;
   try { const raw = await fsp.readFile(NOTEBOOK, 'utf8'); const clean = stripTestGhosts(raw); if (clean !== raw.trim()) { await fsp.writeFile(NOTEBOOK, clean, 'utf8'); console.log('notebook: purged test-mode ghosts'); } } catch {}
   try { const p = await fsp.readFile(PLAN, 'utf8'); if (/TEST MODE/.test(p)) { await fsp.unlink(PLAN); console.log('plan: purged test-mode ghost'); } } catch {}
@@ -518,6 +540,7 @@ app.post('/api/reset', async (req, res) => {
   if (what.workshop) { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
   if (what.learned) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) if (/^learned-/.test(f)) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('learned notes'); }
   if (what.dump) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('entire dump'); }
+  if (what.identity) { await fsp.writeFile(IDENTITY, SEED_IDENTITY, 'utf8'); done.push('identity (reset to seed)'); }
   state.transcript = []; state.topic = ''; state.mission = ''; state.done = false; state.cycle = 0; state.keeperNotes = [];
   try { await fsp.unlink(MISSION_FILE); } catch {} try { await fsp.unlink(KEEPER_NOTES); } catch {}
   res.json({ ok: true, wiped: done });

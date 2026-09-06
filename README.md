@@ -2,7 +2,7 @@
 Three AI minds — FORGE (builder), RAZOR (skeptic), MAGPIE (wildcard) — in one room,
 under your constitution, with your budget laws. You are the Keeper.
 
-## Deploy (own repo, own service — separate from Jarvis)
+## Deploy (own repo, own service)
 1. GitHub: new PRIVATE repo `the-aviary` → push everything (not node_modules/data)
 2. Render: New Web Service → connect → Build `npm install` · Start `node server.js`
 3. Env vars:
