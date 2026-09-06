@@ -37,3 +37,12 @@ a browser open — keep the tab open, or use the $7 plan for true unattended run
   readable per-file, downloadable as one bundle (paste into Cursor to run/test — the Keeper executes, birds never run code).
 - Law 9: research before money. Law 10: build, don't just talk.
 - FREE MISSION: give autopilot the mission "choose your own" (see command below) and the council picks what to build.
+
+## v2.0 — MIND
+- `PURPOSE.md` — the Keeper's. Read first, never editable by the council.
+- `identity.md` — the council's self-model, rewritten after every mission (reflection step).
+- **The wanting loop:** "what do you want to do?" → the council proposes its own mission from purpose + identity + memory.
+  `MIND_AUTONOMY=propose` (default): it proposes, you run/reject. `MIND_AUTONOMY=run`: it starts what it wants by itself.
+- **Heartbeat:** `MIND_HEARTBEAT_HOURS=24` → it wakes once a day on its own (within DAILY_CAP). 0 = off.
+- **Self-change with veto:** the council can write `proposals/*.json` (new law, new bird, process change). You approve in the UI; approved laws append to the constitution, approved birds join the roster live.
+- Never theirs: PURPOSE.md, the kill switch, the budget.

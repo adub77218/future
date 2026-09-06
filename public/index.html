@@ -37,6 +37,18 @@
   <div class="msg" id="live" style="display:none"><div class="who" id="livewho"></div><div class="txt" id="livetxt"></div></div>
   <div id="thinking" style="display:none;font-size:13px;color:#999;padding:12px 0"></div>
   <button id="more" onclick="more()" style="display:none;margin-top:14px;background:#F2F2F2;color:#333;padding:10px 16px">keep going →</button>
+  <details open><summary>🧠 the mind — <span id="mindstate">…</span></summary>
+    <div id="mindbox" style="font-size:13px;color:#444;line-height:1.6;margin-top:8px"></div>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+      <button onclick="wakeIt()" style="background:#5A1C7E;color:#fff;padding:8px 14px">what do you want to do?</button>
+      <button id="runPending" onclick="pend('run')" style="display:none;background:#1A1A1A;color:#fff;padding:8px 14px">run it</button>
+      <button id="rejPending" onclick="pend('reject')" style="display:none;background:#fff;color:#C0392B;border:1px solid #E8B4AC;padding:8px 14px">no</button>
+      <button onclick="toggleAuto()" id="autoBtn" style="background:#F2F2F2;color:#333;padding:8px 14px">autonomy: …</button>
+    </div>
+    <details style="margin-top:8px"><summary style="font-size:12px;color:#888">identity (their self-model)</summary><pre id="identity">…</pre></details>
+    <details style="margin-top:4px"><summary style="font-size:12px;color:#888">purpose (yours; edit PURPOSE.md in the repo)</summary><pre id="purpose">…</pre></details>
+    <div id="proposals" style="margin-top:8px"></div>
+  </details>
   <details open><summary>📄 the master plan (rewritten every cycle)</summary><pre id="plan">…</pre></details>
   <details><summary>🛠️ workshop (what they've built) — <a href="/api/workshop.zip" style="color:#888">download bundle</a></summary><pre id="ws">…</pre></details>
   <details><summary>👤 standing instructions (what you've told them)</summary><pre id="kn">…</pre></details>
@@ -98,6 +110,24 @@ async function studyGo(){
   $('feed').innerHTML=''; lastLen=0; $('topic').value='';
   $('topic').placeholder='say something to them…'; $('go').textContent='say';
 }
+let mindAuto = 'propose';
+async function loadMind(){
+  try{
+    const r = await api('/api/mind'); const m = await r.json();
+    mindAuto = m.autonomy; $('autoBtn').textContent = 'autonomy: ' + (m.autonomy==='run' ? 'RUN what it wants' : 'PROPOSE, I approve');
+    $('identity').textContent = m.identity; $('purpose').textContent = m.purpose;
+    $('mindstate').textContent = m.pending ? 'wants something — your call' : (m.heartbeatHours ? 'heartbeat every '+m.heartbeatHours+'h' : 'idle · '+m.agents.length+' birds');
+    $('mindbox').textContent = m.pending ? ('WANTS: ' + m.pending.mission + '\n\nWHY: ' + m.pending.why + (m.pending.needs_keeper ? '\n\nNEEDS YOU: ' + m.pending.needs_keeper : '')) : '';
+    $('mindbox').style.whiteSpace = 'pre-wrap';
+    $('runPending').style.display = m.pending ? 'inline-block' : 'none'; $('rejPending').style.display = m.pending ? 'inline-block' : 'none';
+    const open = (m.proposals||[]).filter(p=>!p.error);
+    $('proposals').innerHTML = open.length ? '<div style="font-size:12px;color:#888;margin-bottom:4px">proposals to change themselves:</div>' + open.map(p=>'<div style="border:1px solid #EEE;border-radius:8px;padding:8px;margin-bottom:6px;font-size:13px"><b>'+esc(p.type)+'</b> — '+esc(p.text||p.name||'')+(p.rulebook?' <i>'+esc(p.rulebook)+'</i>':'')+'<br><span style="color:#888">why: '+esc(p.why||'')+'</span><br><button onclick="decide(\''+esc(p.file)+'\',\'approve\')" style="background:#1A1A1A;color:#fff;padding:4px 10px;margin-top:4px">approve</button> <button onclick="decide(\''+esc(p.file)+'\',\'reject\')" style="background:#fff;color:#C0392B;border:1px solid #E8B4AC;padding:4px 10px;margin-top:4px">reject</button></div>').join('') : '';
+  }catch(e){}
+}
+async function wakeIt(){ $('mindstate').textContent='thinking about what it wants…'; const r = await api('/api/wake',{method:'POST',body:JSON.stringify({reason:'the Keeper asked'})}); const d = await r.json().catch(()=>({})); if(d.error) alert(d.error); loadMind(); }
+async function pend(what){ await api('/api/pending/'+what,{method:'POST'}); $('feed').innerHTML=''; lastLen=0; loadMind(); }
+async function toggleAuto(){ const next = mindAuto==='run'?'propose':'run'; if(next==='run' && !confirm('RUN mode: the council will start missions it chooses by itself (within the daily budget). You can stop it anytime. Turn on?')) return; await api('/api/mind/autonomy',{method:'POST',body:JSON.stringify({autonomy:next})}); loadMind(); }
+async function decide(file, decision){ await api('/api/proposals/decide',{method:'POST',body:JSON.stringify({file, decision})}); loadMind(); }
 async function loadPlan(){ try{ const r = await api('/api/plan'); $('plan').textContent = await r.text(); }catch(e){} }
 async function loadWs(){ try{ const r = await api('/api/workshop'); const f = await r.json(); $('ws').innerHTML = f.length? f.map(x=>'<a href="/api/workshop/file?p='+encodeURIComponent(x)+'" target="_blank" style="color:#333">'+x+'</a>').join('\n') : '(empty — nothing built yet)'; }catch(e){} }
 async function loadLib(){ try{ const r = await api('/api/dump'); const f = await r.json(); $('lib').textContent = f.length? f.join('\n') : '(empty)'; }catch(e){} }
@@ -161,7 +191,7 @@ async function poll(){
       window.scrollTo({top:document.body.scrollHeight});
     } else {
       $('live').style.display='none';
-      if(s.running && s.speaking){ $('thinking').textContent = (s.speaking==='scribe'?'the scribe is writing the notebook':s.speaking==='planner'?'the planner is rewriting the master plan':(s.speaking==='OWL'?'owl is researching':s.speaking.toLowerCase()+' is thinking'))+'…'; $('thinking').style.display='block'; }
+      if(s.running && s.speaking){ $('thinking').textContent = (s.speaking==='scribe'?'the scribe is writing the notebook':s.speaking==='planner'?'the planner is rewriting the master plan':s.speaking==='reflection'?'the council is rewriting its identity':s.speaking==='wanting'?'the council is deciding what it wants':(s.speaking==='OWL'?'owl is researching':s.speaking.toLowerCase()+' is thinking'))+'…'; $('thinking').style.display='block'; }
       else $('thinking').style.display='none';
     }
     running = !!s.running; haveMission = !!s.mission;
@@ -175,7 +205,7 @@ async function poll(){
   }catch(e){}
 }
 setInterval(poll, 500); poll();
-api('/api/notebook').then(r=>r.text()).then(t=>$('nb').textContent=t); loadLib(); loadPlan(); loadWs();
+api('/api/notebook').then(r=>r.text()).then(t=>$('nb').textContent=t); loadLib(); loadPlan(); loadWs(); loadMind();
 </script>
 </body>
 </html>

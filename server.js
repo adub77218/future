@@ -84,8 +84,9 @@ async function harvestFiles(text, author) {
     let rel = m[1].trim().replace(/\\/g, '/').replace(/^\/+/, '').replace(/^(workshop\/)+/i, '');
     if (rel.includes('..') || !/^[\w\-./ ]+$/.test(rel)) continue;
     if (/^path\/|example|placeholder|your-file/i.test(rel) || /\(complete contents\)|\(ship working code\)/i.test(m[2])) continue;
-    const full = path.join(WORKSHOP, rel);
-    if (!full.startsWith(WORKSHOP)) continue;
+    let full = path.join(WORKSHOP, rel);
+    if (/^proposals\//.test(rel)) full = path.join(__dirname, rel);
+    if (!full.startsWith(WORKSHOP) && !full.startsWith(PROPOSALS)) continue;
     await fsp.mkdir(path.dirname(full), { recursive: true });
     await fsp.writeFile(full, m[2].slice(0, MAX_FILE_BYTES), 'utf8');
     written.push(rel);
@@ -111,8 +112,16 @@ const EST_COST_PER_CALL = 0.012; // rough $ estimate per model call at these siz
 
 const DATA = path.join(__dirname, 'data');
 const NOTEBOOK = path.join(__dirname, 'notebook.md');
-const CONSTITUTION = fs.readFileSync(path.join(__dirname, 'constitution.md'), 'utf8');
-const AGENTS = require('./agents.js');
+const BASE_AGENTS = require('./agents.js');
+const EXTRA_AGENTS = path.join(__dirname, 'data', 'extra-agents.json');
+function readConstitution() { try { return fs.readFileSync(path.join(__dirname, 'constitution.md'), 'utf8'); } catch { return ''; } }
+function getAgents() { try { return BASE_AGENTS.concat(JSON.parse(fs.readFileSync(EXTRA_AGENTS, 'utf8'))); } catch { return BASE_AGENTS; } }
+const PURPOSE = path.join(__dirname, 'PURPOSE.md');
+const IDENTITY = path.join(__dirname, 'identity.md');
+const PROPOSALS = path.join(__dirname, 'proposals');
+function readPurpose() { try { return fs.readFileSync(PURPOSE, 'utf8'); } catch { return '(no purpose file)'; } }
+function readIdentity() { try { return fs.readFileSync(IDENTITY, 'utf8'); } catch { return '(no identity yet)'; } }
+const MIND = { autonomy: process.env.MIND_AUTONOMY || 'propose', heartbeatHours: Number(process.env.MIND_HEARTBEAT_HOURS || 0), lastWake: 0, pending: null };
 
 const anthropic = KEY ? new Anthropic({ apiKey: KEY }) : null;
 const app = express();
@@ -227,13 +236,13 @@ async function callAgent(messages, system, onDelta) {
 // ---- the session loop ----
 let roundSpoken = new Set();
 function pickNext(lastText, lastAgentId) {
-  const ring = AGENTS.filter(a => !a.researcher);
+  const ring = getAgents().filter(a => !a.researcher);
   if (lastAgentId) roundSpoken.add(lastAgentId);
   if (ring.every(a => roundSpoken.has(a.id))) roundSpoken = new Set(); // new round: everyone eligible again
   const eligible = ring.filter(a => !roundSpoken.has(a.id));
   // pass the mic by name ONLY to someone who hasn't spoken this round (OWL may be summoned once per round)
   if (lastText) {
-    for (const a of AGENTS) {
+    for (const a of getAgents()) {
       if (a.id === lastAgentId) continue;
       if (roundSpoken.has(a.id)) continue;
       if (new RegExp('\\b' + a.name + '\\b', 'i').test(lastText)) { if (a.researcher) roundSpoken.add(a.id); return a; }
@@ -251,14 +260,16 @@ async function runTurns(turns) {
     const nb = await notebookText();
     roundSpoken = new Set();
   let last = state.transcript.filter(x => x.agent !== 'keeper' && x.agent !== 'host').slice(-1)[0];
-    let agent = last ? pickNext(last.text, last.agent) : AGENTS.filter(a => !a.researcher)[0];
+    let agent = last ? pickNext(last.text, last.agent) : getAgents().filter(a => !a.researcher)[0];
     for (let t = 0; t < turns; t++) {
       if (state.killed) break;
       const u = await usage();
       if (u.calls >= DAILY_CALL_CAP) { state.error = 'Daily budget law reached. The Aviary sleeps until tomorrow.'; break; }
       state.speaking = agent.name;
       const system = [
-        CONSTITUTION,
+        `== PURPOSE (the Keeper's; you cannot change it) ==\n${readPurpose()}`,
+        `\n== IDENTITY (your model of yourself; you rewrite it after every mission) ==\n${readIdentity()}`,
+        readConstitution(),
         `\n== YOUR RULEBOOK ==\n${agent.rulebook}`,
         `\n== THE NOTEBOOK (council memory) ==\n${nb}`,
         `\n== THE DUMP (knowledge the Keeper fed you) ==\n${digest}`,
@@ -266,7 +277,7 @@ async function runTurns(turns) {
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
         (state.keeperNotes.length ? `\n== THE KEEPER'S STANDING INSTRUCTIONS (obey these; newest last) ==\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''),
         `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
-        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
@@ -288,7 +299,7 @@ async function runTurns(turns) {
     }
     if (!state.killed && state.transcript.length) {
       state.speaking = 'scribe';
-      const summarySys = CONSTITUTION + '\nYou are the council SCRIBE. Write the notebook entry.';
+      const summarySys = readConstitution() + '\nYou are the council SCRIBE. Write the notebook entry.';
       const convo = [{ role: 'user', content: `Session topic: ${state.topic}\n\nTranscript:\n${state.transcript.map(x => x.name + ': ' + x.text).join('\n\n')}\n\nWrite 3-5 bullet points of what the council concluded or built, then one line: "NEXT: <the topic the council should explore next session>". Plain text.` }];
       let entry;
       try { entry = await callAgent(convo, summarySys); await bumpUsage(); }
@@ -332,7 +343,7 @@ async function planText() {
 async function rewritePlan() {
   state.speaking = 'planner';
   const prev = await planText();
-  const sys = CONSTITUTION + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\n## STATUS\nThe very last line of the document must be exactly `STATUS: IN PROGRESS` or `STATUS: COMPLETE`. Declare COMPLETE only when ALL are true: (1) a runnable product exists in the workshop with a README the Keeper can follow, (2) a concrete first-10-customers plan is written, (3) a list of what needs a human is written, (4) RAZOR has failed to kill the plan in the latest cycle. Otherwise IN PROGRESS. Mark unverified claims with [unverified]. Be concrete, no fluff.';
+  const sys = readConstitution() + '\nYou are the council PLANNER. You maintain THE MASTER PLAN document. Rewrite it in full every cycle, improving it with what the council just learned and decided. Keep what still holds, cut what got refuted, add what got proven. Structure (markdown): # THE PLAN — <mission>\n## Thesis (2-3 sentences)\n## Why now\n## The wedge (the specific first product/experiment)\n## Execution roadmap (Phase 0 this month → Phase 1 → Phase 2 → Phase 3, with concrete actions, who/what/cost)\n## Economics (how it reaches a billion, honest numbers with sources from the notes when available)\n## Biggest risks + how we kill them\n## What the Keeper does THIS WEEK\n## What the council builds ITSELF next (files for the workshop)\n## Open questions for the next study cycle\n## STATUS\nThe very last line of the document must be exactly `STATUS: IN PROGRESS`, `STATUS: NEEDS KEEPER`, or `STATUS: COMPLETE`. Use NEEDS KEEPER when the next step requires a human (a browser test, a real API key, a real file, a decision) — and write the exact ask in a section `## What the Keeper must do now`. Declare COMPLETE only when ALL are true: (1) a runnable product exists in the workshop with a README the Keeper can follow, (2) a concrete first-10-customers plan is written, (3) a list of what needs a human is written, (4) RAZOR has failed to kill the plan in the latest cycle. Otherwise IN PROGRESS. Mark unverified claims with [unverified]. Be concrete, no fluff.';
   const convo = [{ role: 'user', content: `MISSION: ${state.mission}\n\nPREVIOUS PLAN:\n${prev.slice(0, 6000)}\n\nTHIS CYCLE'S TRANSCRIPT:\n${state.transcript.map(x => x.name + ': ' + x.text).join('\n\n').slice(0, 14000)}\n\nRewrite THE MASTER PLAN in full.` }];
   let text;
   try {
@@ -342,6 +353,40 @@ async function rewritePlan() {
     await fsp.writeFile(PLAN, text, 'utf8');
   } catch (e) { state.error = 'planner failed: ' + String(e.message || e); }
   state.speaking = null;
+}
+async function reflect(outcome) {
+  state.speaking = 'reflection';
+  const sys = readConstitution() + '\nYou are the council REFLECTING on itself. Rewrite identity.md in full: keep the sections (Who we are / What we have learned about ourselves / What we are bad at / What we want next). Be specific and honest, cite this mission\'s events. "What we want next" must be a concrete mission the council would choose for itself, one paragraph, consistent with PURPOSE.';
+  const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nCURRENT IDENTITY:\n${readIdentity()}\n\nMISSION JUST ENDED (${outcome}): ${state.mission}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nPLAN STATUS:\n${(await planText()).slice(-1500)}\n\nRewrite identity.md.` }];
+  try {
+    let text;
+    if (TEST) text = readIdentity().replace('(empty — we haven\'t chosen yet)', `(TEST) After "${state.mission}": build a tiny benchmark and beat it.`).replace(/\(TEST\) After[^\n]*\n?/g, m => m) ;
+    else { const out = await anthropic.messages.create({ model: MODEL, max_tokens: 1800, system: sys, messages: convo }); text = (out.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim(); }
+    await bumpUsage();
+    if (text && text.length > 100) await fsp.writeFile(IDENTITY, text, 'utf8');
+  } catch (e) { state.error = 'reflection failed: ' + String(e.message || e); }
+  state.speaking = null;
+}
+async function wake(reason) {
+  // THE WANTING LOOP: the council chooses its own mission from purpose + identity + memory
+  if (state.running) return { error: 'busy' };
+  const u = await usage(); if (u.calls >= DAILY_CALL_CAP) return { error: 'daily budget reached' };
+  MIND.lastWake = Date.now();
+  state.speaking = 'wanting';
+  const sys = readConstitution() + '\nYou are the whole council deciding what to WANT. Output ONLY JSON: {"mission": "<one clear mission, 2-5 sentences, bench-checkable, not obvious, within purpose>", "why": "<2 sentences>", "needs_keeper": "<what only the human can provide, or empty>"}';
+  const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nIDENTITY:\n${readIdentity()}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nLIBRARY: ${(await workshopList()).join(', ') || '(empty)'}\n\nWake reason: ${reason}. Choose the mission you most want to do next.` }];
+  let want;
+  try {
+    if (TEST) want = { mission: 'TEST WANT: build a 20-line benchmark harness and beat a baseline on the bench', why: 'canned', needs_keeper: '' };
+    else { const out = await anthropic.messages.create({ model: MODEL, max_tokens: 700, system: sys, messages: convo }); const t = (out.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('').trim().replace(/^```json|```$/g, ''); want = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1)); }
+    await bumpUsage();
+  } catch (e) { state.speaking = null; return { error: 'could not decide: ' + String(e.message || e) }; }
+  state.speaking = null;
+  MIND.pending = { ...want, at: Date.now(), reason };
+  state.transcript.push({ agent: 'keeper', name: 'THE COUNCIL WANTS', emoji: '🧠', color: '#5A1C7E', text: `MISSION: ${want.mission}\n\nWHY: ${want.why}${want.needs_keeper ? '\n\nNEEDS KEEPER: ' + want.needs_keeper : ''}`, t: Date.now() });
+  state.done = true;
+  if (MIND.autonomy === 'run' && !want.needs_keeper) { state.keeperNotes = [`(self-chosen mission) ${want.why}`]; await saveKeeperNotes(); autopilot(want.mission, 0, true); MIND.pending = null; }
+  return { ok: true, want };
 }
 async function nextSubtopic() {
   const nb = await notebookText();
@@ -371,12 +416,19 @@ async function autopilot(mission, cycles, resume = false) {
     if (state.error) { failures++; if (failures >= 3) { state.error = 'STOPPED after 3 failing cycles: ' + state.error; break; } } else failures = 0;
     // completion: the planner declares it
     const plan = await planText();
+    if (/^STATUS:\s*NEEDS KEEPER/mi.test(plan)) {
+      const ask = (plan.match(/## What the Keeper must do now[\s\S]*?(?=\n## |$)/i) || [''])[0].trim();
+      state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '⏸️', color: '#888', text: `PAUSED — the council needs the Keeper.\n${ask || 'See the master plan.'}\n\nType what happened and hit continue.`, t: Date.now() });
+      break;
+    }
     if (/^STATUS:\s*COMPLETE/mi.test(plan)) {
       state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '🏁', color: '#888', text: `MISSION COMPLETE — declared by the planner after cycle ${c}. Read the master plan and the workshop.`, t: Date.now() });
       break;
     }
   }
+  await reflect(state.killed ? 'killed by keeper' : (state.error ? 'stopped: ' + state.error : 'ended'));
   state.autopilot = false; state.running = false; state.done = true;
+  if (MIND.autonomy === 'run' && MIND.heartbeatHours === 0 && !state.killed && !/STOPPED/.test(state.error || '')) { /* stays idle; heartbeat or keeper wakes it */ }
 }
 async function runStudySession(topic) {
   state.topic = topic; state.turn = 0; state.transcript = []; state.running = true; state.killed = false; state.done = false; state.error = null;
@@ -414,6 +466,34 @@ app.post('/api/autopilot', (req, res) => {
   res.json({ ok: true });
 });
 app.get('/api/plan', async (_req, res) => res.type('text/plain').send(await planText()));
+app.get('/api/mind', async (_req, res) => {
+  let props = [];
+  try { for (const f of (await fsp.readdir(PROPOSALS)).filter(x => x.endsWith('.json'))) { try { props.push({ file: f, ...JSON.parse(await fsp.readFile(path.join(PROPOSALS, f), 'utf8')) }); } catch { props.push({ file: f, error: 'unreadable' }); } } } catch {}
+  res.json({ purpose: readPurpose(), identity: readIdentity(), autonomy: MIND.autonomy, heartbeatHours: MIND.heartbeatHours, pending: MIND.pending, proposals: props, agents: getAgents().map(a => a.name) });
+});
+app.post('/api/wake', async (req, res) => res.json(await wake(String((req.body || {}).reason || 'the Keeper asked what you want'))));
+app.post('/api/pending/run', async (_req, res) => {
+  if (!MIND.pending) return res.status(400).json({ error: 'nothing pending' });
+  const p = MIND.pending; MIND.pending = null;
+  state.keeperNotes = [`(self-chosen mission, approved by the Keeper) ${p.why}`]; await saveKeeperNotes();
+  autopilot(p.mission, 0, true); res.json({ ok: true });
+});
+app.post('/api/pending/reject', async (_req, res) => { MIND.pending = null; res.json({ ok: true }); });
+app.post('/api/mind/autonomy', (req, res) => { const a = String((req.body || {}).autonomy || ''); if (!['propose', 'run'].includes(a)) return res.status(400).json({ error: 'propose|run' }); MIND.autonomy = a; res.json({ ok: true, autonomy: a }); });
+app.post('/api/proposals/decide', async (req, res) => {
+  const { file, decision } = req.body || {};
+  if (!file || !/^[\w\-.]+\.json$/.test(file)) return res.status(400).json({ error: 'bad file' });
+  const full = path.join(PROPOSALS, file);
+  let p; try { p = JSON.parse(await fsp.readFile(full, 'utf8')); } catch { return res.status(404).json({ error: 'not found' }); }
+  if (decision === 'approve') {
+    if (p.type === 'law' && p.text) await fsp.appendFile(path.join(__dirname, 'constitution.md'), `\n${String(p.text).trim()} [approved by the Keeper ${new Date().toLocaleDateString()}]\n`);
+    else if (p.type === 'bird' && p.name && p.rulebook) { let extra = []; try { extra = JSON.parse(await fsp.readFile(EXTRA_AGENTS, 'utf8')); } catch {} extra.push({ id: String(p.name).toLowerCase().replace(/\W+/g, ''), name: String(p.name).toUpperCase(), emoji: p.emoji || '🐦', color: p.color || '#888', rulebook: String(p.rulebook), researcher: !!p.researcher }); await fsp.mkdir(DATA, { recursive: true }); await fsp.writeFile(EXTRA_AGENTS, JSON.stringify(extra, null, 2)); }
+    else if (p.type === 'process' && p.text) await fsp.appendFile(NOTEBOOK, `\n\n## PROCESS CHANGE (approved by the Keeper)\n${String(p.text).trim()}\n`);
+    else return res.status(400).json({ error: 'unknown proposal type' });
+    await fsp.rename(full, full.replace(/\.json$/, '.approved.txt'));
+  } else { await fsp.rename(full, full.replace(/\.json$/, '.rejected.txt')); }
+  res.json({ ok: true, decision });
+});
 app.post('/api/reset', async (req, res) => {
   if (state.running) return res.status(409).json({ error: 'stop the session first' });
   const what = req.body || {};
@@ -474,11 +554,17 @@ app.post('/api/say', (req, res) => {
 });
 app.get('/api/state', async (_req, res) => {
   const u = await usage();
-  res.json({ ...state, usage: u, spendEstimate: +(u.calls * EST_COST_PER_CALL).toFixed(2), caps: { turns: MAX_TURNS_PER_SESSION, daily: DAILY_CALL_CAP }, brain: !!anthropic || TEST, agents: AGENTS.map(a => ({ name: a.name, emoji: a.emoji, color: a.color })) });
+  res.json({ ...state, usage: u, spendEstimate: +(u.calls * EST_COST_PER_CALL).toFixed(2), caps: { turns: MAX_TURNS_PER_SESSION, daily: DAILY_CALL_CAP }, brain: !!anthropic || TEST, agents: getAgents().map(a => ({ name: a.name, emoji: a.emoji, color: a.color })) });
 });
 app.get('/api/notebook', async (_req, res) => {
   res.type('text/plain').send(await notebookText());
 });
 app.get('/health', (_req, res) => res.json({ ok: true, brain: !!anthropic || TEST, test: TEST }));
 
+setInterval(async () => {
+  if (!MIND.heartbeatHours || state.running || TEST) return;
+  if (Date.now() - MIND.lastWake < MIND.heartbeatHours * 3600e3) return;
+  if (MIND.pending) return; // waiting on the keeper
+  await wake('heartbeat');
+}, 10 * 60e3).unref();
 app.listen(PORT, async () => { purgeTestGhosts(); await loadKeeperNotes(); try { state.mission = await fsp.readFile(MISSION_FILE, 'utf8'); state.done = true; } catch {} console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });
