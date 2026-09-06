@@ -39,6 +39,7 @@
   <button id="more" onclick="more()" style="display:none;margin-top:14px;background:#F2F2F2;color:#333;padding:10px 16px">keep going →</button>
   <details open><summary>📄 the master plan (rewritten every cycle)</summary><pre id="plan">…</pre></details>
   <details><summary>🛠️ workshop (what they've built) — <a href="/api/workshop.zip" style="color:#888">download bundle</a></summary><pre id="ws">…</pre></details>
+  <details><summary>👤 standing instructions (what you've told them)</summary><pre id="kn">…</pre></details>
   <details><summary>notebook (their memory)</summary><pre id="nb">…</pre></details>
   <details><summary>library (what they've learned)</summary><pre id="lib">…</pre></details>
 </div>
@@ -63,7 +64,7 @@ async function api(p, o={}){
   if(r.status===401){ const v = prompt('PIN:'); if(v!==null){ localStorage.setItem('lab-pin', v.trim()); return api(p,o); } }
   return r;
 }
-let running = false;
+let running = false, haveMission = false, forceNew = false;
 async function start(){
   const t = $('topic').value.trim(); if(!t) return;
   $('err').classList.remove('on');
@@ -71,7 +72,13 @@ async function start(){
     await api('/api/say',{method:'POST',body:JSON.stringify({text:t})});
     $('topic').value=''; return;
   }
-  // idle: this is a MISSION -> autopilot (research first, build until done)
+  if(haveMission && !forceNew){ // idle with a mission on file: this is a STEER, mission continues
+    const r = await api('/api/steer',{method:'POST',body:JSON.stringify({text:t})});
+    if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not continue'; $('err').classList.add('on'); return; }
+    $('feed').innerHTML=''; lastLen=0; $('topic').value=''; return;
+  }
+  // idle, no mission (or new mission requested): autopilot (research first, build until done)
+  forceNew = false;
   const c = Number($('cycles').value)||0;
   const r = await api('/api/autopilot',{method:'POST',body:JSON.stringify({mission:t, cycles:c})});
   if(!r.ok){ const d = await r.json().catch(()=>({})); $('err').textContent = d.error||'could not start'; $('err').classList.add('on'); return; }
@@ -119,7 +126,7 @@ async function wipe(){
   $('feed').innerHTML=''; lastLen=0; newTopic(); loadPlan(); loadLib(); loadWs();
 }
 async function more(){ $('more').style.display='none'; await api('/api/continue',{method:'POST'}); }
-function newTopic(){ $('topic').value=''; $('topic').focus(); }
+function newTopic(){ forceNew = true; $('topic').value=''; $('topic').placeholder='NEW mission… (previous mission and its standing instructions are replaced)'; $('go').textContent='start new'; $('topic').focus(); }
 document.addEventListener('keydown', e=>{ if(e.key==='Enter' && document.activeElement===$('topic')) start(); });
 async function kill(){ await api('/api/kill',{method:'POST'}); }
 function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -131,6 +138,7 @@ async function poll(){
       : s.killed ? 'stopped' : (!s.brain ? 'no brain — add the key' : (s.done && s.transcript.length ? 'done' : 'standing by'));
     $('usage').textContent = 'today: '+s.usage.calls+' calls · ~$'+(s.spendEstimate||0).toFixed(2)+' est.' + (s.autopilot? ' · cycle '+s.cycle+'/'+(s.cycles||'∞') : '');
     $('meta').textContent = s.topic ? ('topic: '+s.topic) : '';
+    $('kn').textContent = (s.keeperNotes&&s.keeperNotes.length)? s.keeperNotes.map((n,i)=>(i+1)+'. '+n).join('\n') : '(none yet — type while idle and hit continue)';
     if(s.error){ $('err').textContent = s.error; $('err').classList.add('on'); }
     if(s.transcript.length > lastLen){
       for(let i=lastLen;i<s.transcript.length;i++){
@@ -156,8 +164,10 @@ async function poll(){
       if(s.running && s.speaking){ $('thinking').textContent = (s.speaking==='scribe'?'the scribe is writing the notebook':s.speaking==='planner'?'the planner is rewriting the master plan':(s.speaking==='OWL'?'owl is researching':s.speaking.toLowerCase()+' is thinking'))+'…'; $('thinking').style.display='block'; }
       else $('thinking').style.display='none';
     }
-    running = !!s.running;
+    running = !!s.running; haveMission = !!s.mission;
     if(running){ $('topic').placeholder='say something to them… (they will answer)'; $('go').textContent='say'; $('cycles').style.display='none'; }
+    else if(forceNew){ /* keep the new-mission prompt */ }
+    else if(haveMission){ $('topic').placeholder='steer them… (instruction sticks for every cycle; mission continues)'; $('go').textContent='continue'; $('cycles').style.display='none'; }
     else { $('topic').placeholder='give them a mission… (they research first, then build until done)'; $('go').textContent='start'; $('cycles').style.display=''; }
     $('more').style.display = (s.done && !s.running && s.transcript.length && !s.killed) ? 'inline-block' : 'none';
     if(s.done && !s.running){ const n = await api('/api/notebook'); $('nb').textContent = await n.text(); loadLib(); loadPlan(); }

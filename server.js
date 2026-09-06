@@ -31,7 +31,7 @@ async function probe(args, cwd) {
   if (!/^https?:\/\/(localhost|127\.0\.0\.1)/.test(url)) return '[probe] only localhost urls';
   return new Promise((resolve) => {
     let out = `$ probe ${entry} ${url}\n`;
-    const child = spawn('node', [entry], { cwd, env: { PATH: process.env.PATH, HOME: cwd, LANG: 'C.UTF-8' } });
+    const child = spawn('node', [entry], { cwd, env: { PATH: process.env.PATH, HOME: cwd, LANG: 'C.UTF-8', ANTHROPIC_API_KEY: 'sk-ant-bench-fake-key-calls-will-401', PORT: '3000' } });
     let done = false;
     const finish = (extra) => { if (done) return; done = true; child.kill('SIGKILL'); resolve(out + extra); };
     child.stdout.on('data', d => out += d); child.stderr.on('data', d => out += d);
@@ -59,7 +59,7 @@ async function runInWorkshop(cmd) {
   if (/^npm\s+(install|i)\b/.test(cmd) && !/--ignore-scripts/.test(cmd)) cmd += ' --ignore-scripts';
   await fsp.mkdir(WORKSHOP, { recursive: true });
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', cmd], { cwd, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8' } });
+    const child = spawn('bash', ['-lc', cmd], { cwd, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8', ANTHROPIC_API_KEY: 'sk-ant-bench-fake-key-calls-will-401', PORT: '3000' } });
     let out = '';
     const cap = (d) => { out += d.toString(); if (out.length > 6000) out = out.slice(0, 6000) + '\n…[truncated]'; };
     let serverSeen = false;
@@ -134,8 +134,12 @@ const state = {
   partial: null,            // {agent, name, color, text} — the thought being typed right now
   speaking: null,           // agent name currently thinking
   error: null, done: false,
-  mission: '', cycle: 0, cycles: 0, autopilot: false
+  mission: '', cycle: 0, cycles: 0, autopilot: false, keeperNotes: []
 };
+const KEEPER_NOTES = path.join(DATA, 'keeper-notes.json');
+const MISSION_FILE = path.join(DATA, 'mission.txt');
+async function loadKeeperNotes() { try { state.keeperNotes = JSON.parse(await fsp.readFile(KEEPER_NOTES, 'utf8')); } catch { state.keeperNotes = []; } }
+async function saveKeeperNotes() { await fsp.mkdir(DATA, { recursive: true }); await fsp.writeFile(KEEPER_NOTES, JSON.stringify(state.keeperNotes.slice(-20)), 'utf8'); }
 
 // ---- usage ledger (daily cap) ----
 async function usage() {
@@ -260,8 +264,9 @@ async function runTurns(turns) {
         `\n== THE DUMP (knowledge the Keeper fed you) ==\n${digest}`,
         `\n== SESSION TOPIC ==\n${state.topic}`,
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
+        (state.keeperNotes.length ? `\n== THE KEEPER'S STANDING INSTRUCTIONS (obey these; newest last) ==\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''),
         `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
-        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). Read the results and fix what broke.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${AGENTS.filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
@@ -344,15 +349,17 @@ async function nextSubtopic() {
   if (m && m.length) return m[m.length - 1].replace(/^NEXT:\s*/, '').trim().slice(0, 250);
   return state.mission;
 }
-async function autopilot(mission, cycles) {
+async function autopilot(mission, cycles, resume = false) {
+  if (!resume) { state.keeperNotes = []; await saveKeeperNotes(); }
   state.mission = mission; state.cycles = cycles; state.cycle = 0; state.autopilot = true; state.killed = false; state.error = null;
+  try { await fsp.mkdir(DATA, { recursive: true }); await fsp.writeFile(MISSION_FILE, mission, 'utf8'); } catch {}
   let failures = 0;
   for (let c = 1; cycles === 0 || c <= cycles; c++) {
     if (state.killed) break;
     state.cycle = c;
     const sub = c === 1 ? mission : await nextSubtopic();
     state.topic = `[cycle ${c}/${cycles || '∞'}] ${sub}`; state.turn = 0; state.transcript = [];
-    state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '🛰️', color: '#888', text: `Cycle ${c}${cycles ? ' of ' + cycles : ' (running until DONE)'}. Mission: ${mission}\nThis cycle's focus: ${sub}`, t: Date.now() });
+    state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '🛰️', color: '#888', text: `Cycle ${c}${cycles ? ' of ' + cycles : ' (running until DONE)'}. Mission: ${mission}\nThis cycle's focus: ${sub}` + (state.keeperNotes.length ? `\n\nKEEPER'S STANDING INSTRUCTIONS:\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''), t: Date.now() });
     state.running = true; state.done = false;
     try { await study(sub); } catch (e) { state.error = 'OWL could not research: ' + String(e.message || e); }
     if (state.killed) break;
@@ -415,7 +422,8 @@ app.post('/api/reset', async (req, res) => {
   if (what.plan) { try { await fsp.unlink(PLAN); } catch {} done.push('plan'); }
   if (what.workshop) { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
   if (what.learned) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) if (/^learned-/.test(f)) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('learned notes'); }
-  state.transcript = []; state.topic = ''; state.mission = ''; state.done = false; state.cycle = 0;
+  state.transcript = []; state.topic = ''; state.mission = ''; state.done = false; state.cycle = 0; state.keeperNotes = [];
+  try { await fsp.unlink(MISSION_FILE); } catch {} try { await fsp.unlink(KEEPER_NOTES); } catch {}
   res.json({ ok: true, wiped: done });
 });
 app.get('/api/workshop', async (_req, res) => res.json(await workshopList()));
@@ -446,6 +454,17 @@ app.post('/api/continue', (req, res) => {
   runTurns(MAX_TURNS_PER_SESSION);
   res.json({ ok: true });
 });
+app.post('/api/steer', async (req, res) => {
+  // Keeper instruction that PERSISTS across cycles; resumes the mission if idle
+  if (state.running) return res.status(409).json({ error: 'use say while running' });
+  const text = String((req.body || {}).text || '').slice(0, 4000).trim();
+  if (!text) return res.status(400).json({ error: 'say something' });
+  if (!state.mission) return res.status(400).json({ error: 'no mission to continue — start one' });
+  state.keeperNotes.push(text); await saveKeeperNotes();
+  state.transcript.push({ agent: 'keeper', name: 'KEEPER', emoji: '👤', color: '#1A1A1A', text, t: Date.now() });
+  autopilot(state.mission, 0, true);
+  res.json({ ok: true });
+});
 app.post('/api/say', (req, res) => {
   const text = String((req.body || {}).text || '').slice(0, 4000).trim();
   if (!text) return res.status(400).json({ error: 'say something' });
@@ -462,4 +481,4 @@ app.get('/api/notebook', async (_req, res) => {
 });
 app.get('/health', (_req, res) => res.json({ ok: true, brain: !!anthropic || TEST, test: TEST }));
 
-app.listen(PORT, () => { purgeTestGhosts(); console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });
+app.listen(PORT, async () => { purgeTestGhosts(); await loadKeeperNotes(); try { state.mission = await fsp.readFile(MISSION_FILE, 'utf8'); state.done = true; } catch {} console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });
