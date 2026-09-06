@@ -23,7 +23,7 @@ const WORKSHOP = path.join(__dirname, 'workshop');
 const { spawn } = require('child_process');
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT || 60000);
 const MAX_RUNS_PER_TURN = 3;
-const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch|sleep|curl|probe)\b/;
+const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch|sleep|curl|probe|snapshot-docs)\b/;
 async function probe(args, cwd) {
   // probe <entry.js> <url> — boots a server, waits for it, fetches the url, prints the body, stops it
   const [entry, url = 'http://localhost:3000/'] = args;
@@ -31,9 +31,9 @@ async function probe(args, cwd) {
   if (!/^https?:\/\/(localhost|127\.0\.0\.1)/.test(url)) return '[probe] only localhost urls';
   return new Promise((resolve) => {
     let out = `$ probe ${entry} ${url}\n`;
-    const child = spawn('node', [entry], { cwd, env: { PATH: process.env.PATH, HOME: cwd, LANG: 'C.UTF-8', ANTHROPIC_API_KEY: 'sk-ant-bench-fake-key-calls-will-401', PORT: '3000' } });
+    const child = spawn('node', [entry], { cwd, detached: true, env: { PATH: process.env.PATH, HOME: cwd, LANG: 'C.UTF-8', ANTHROPIC_API_KEY: 'sk-ant-bench-fake-key-calls-will-401', PORT: '3000' } });
     let done = false;
-    const finish = (extra) => { if (done) return; done = true; child.kill('SIGKILL'); resolve(out + extra); };
+    const finish = (extra) => { if (done) return; done = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} try { child.kill('SIGKILL'); } catch {} resolve(out + extra); };
     child.stdout.on('data', d => out += d); child.stderr.on('data', d => out += d);
     child.on('exit', (code) => { if (!done) finish(`\n[server exited early with code ${code}]`); });
     const tryFetch = async (attempt) => {
@@ -54,20 +54,31 @@ async function runInWorkshop(cmd) {
   if (cdm) { const sub = path.join(WORKSHOP, cdm[1]); if (!sub.startsWith(WORKSHOP)) return `[blocked] cd outside workshop`; cwd = sub; cmd = cdm[2].trim(); }
   if (!ALLOWED.test(cmd)) return `[blocked] only node/npm/python/curl(localhost)/probe/basic file commands are allowed: ${cmd}`;
   if (/\.\.\/|\/etc\/|\/root|~|\$\(|`|\|\s*sh\b/.test(cmd)) return `[blocked] unsafe path or shell trick: ${cmd}`;
+  if (/&\s*$|&\s*;|nohup|pkill|kill\b/.test(cmd)) return `[blocked] no backgrounding (&) or kill on the bench — to test a server use: probe <file> <localhost url>`;
   if (/^curl\b/.test(cmd) && !/https?:\/\/(localhost|127\.0\.0\.1)/.test(cmd)) return `[blocked] curl is localhost-only on the bench`;
+  if (/^snapshot-docs\b/.test(cmd)) {
+    // copy the council's own documents into workshop/docs/ (read-only snapshot) so tools can read them
+    const dest = path.join(WORKSHOP, 'docs'); await fsp.mkdir(dest, { recursive: true });
+    const copied = [];
+    for (const f of ['PURPOSE.md', 'identity.md', 'constitution.md', 'notebook.md', 'plan.md', 'README.md']) { try { await fsp.copyFile(path.join(__dirname, f), path.join(dest, f)); copied.push(f); } catch {} }
+    for (const dir of ['dump', 'proposals']) { try { await fsp.mkdir(path.join(dest, dir), { recursive: true }); for (const f of await fsp.readdir(path.join(__dirname, dir))) { if (/\.(md|txt|json)$/.test(f)) { await fsp.copyFile(path.join(__dirname, dir, f), path.join(dest, dir, f)); copied.push(dir + '/' + f); } } } catch {} }
+    return `$ snapshot-docs\ncopied ${copied.length} files into docs/:\n${copied.join('\n')}\n[exit 0]`;
+  }
   if (/^probe\b/.test(cmd)) return probe(cmd.split(/\s+/).slice(1), cwd);
   if (/^npm\s+(install|i)\b/.test(cmd) && !/--ignore-scripts/.test(cmd)) cmd += ' --ignore-scripts';
   await fsp.mkdir(WORKSHOP, { recursive: true });
   return new Promise((resolve) => {
-    const child = spawn('bash', ['-lc', cmd], { cwd, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8', ANTHROPIC_API_KEY: 'sk-ant-bench-fake-key-calls-will-401', PORT: '3000' } });
-    let out = '';
+    const child = spawn('bash', ['-lc', cmd], { cwd, detached: true, env: { PATH: process.env.PATH, HOME: WORKSHOP, LANG: 'C.UTF-8', ANTHROPIC_API_KEY: 'sk-ant-bench-fake-key-calls-will-401', PORT: '3000' } });
+    let out = '', settled = false;
+    const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} try { child.kill('SIGKILL'); } catch {} };
+    const settle = (extra) => { if (settled) return; settled = true; clearTimeout(timer); killGroup(); resolve(`$ ${cmd}\n${(out + (extra || '')).trim() || '(no output)'}`); };
     const cap = (d) => { out += d.toString(); if (out.length > 6000) out = out.slice(0, 6000) + '\n…[truncated]'; };
     let serverSeen = false;
     const watch = (d) => { cap(d); if (!serverSeen && /listening|running (on|at)|open on|started|http:\/\/localhost/i.test(out)) { serverSeen = true;
-      setTimeout(() => { child.kill('SIGKILL'); out += '\n[server started OK — stopped by the bench after 4s; that is a PASS for a web server]'; }, 4000); } };
+      setTimeout(() => settle('\n[server started OK — stopped by the bench after 4s; that is a PASS for a web server]\n[exit null]'), 4000); } };
     child.stdout.on('data', watch); child.stderr.on('data', watch);
-    const timer = setTimeout(() => { child.kill('SIGKILL'); out += `\n[killed after ${RUN_TIMEOUT_MS / 1000}s]`; }, RUN_TIMEOUT_MS);
-    child.on('close', (code) => { clearTimeout(timer); resolve(`$ ${cmd}\n${out.trim() || '(no output)'}\n[exit ${code}]`); });
+    const timer = setTimeout(() => settle(`\n[killed after ${RUN_TIMEOUT_MS / 1000}s]\n[exit null]`), RUN_TIMEOUT_MS);
+    child.on('exit', (code) => { setTimeout(() => settle(`\n[exit ${code}]`), 150); });
   });
 }
 function harvestRuns(text) {
@@ -277,7 +288,7 @@ async function runTurns(turns) {
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
         (state.keeperNotes.length ? `\n== THE KEEPER'S STANDING INSTRUCTIONS (obey these; newest last) ==\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''),
         `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
-        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To read your own documents (PURPOSE, identity, constitution, notebook, plan, dump, proposals) run "snapshot-docs" — it copies them into docs/ inside the workshop. To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
@@ -325,7 +336,7 @@ async function study(topic) {
     const out = await anthropic.messages.create({
       model: MODEL, max_tokens: 1500,
       system: 'You are OWL, a careful researcher. Use web search to gather facts on the topic. Output plain-text study notes: 6-10 bullet points, each a specific verified fact with its source URL in brackets. Then a section "GAPS / COULD NOT VERIFY" listing claims you searched for but could not confirm. No speculation.',
-      messages: [{ role: 'user', content: `Research this for the council: ${topic}` }],
+      messages: [{ role: 'user', content: `The council's mission is:\n"${topic}"\n\nYou are not asked to do the mission. Research the FACTS the council will need to do it well: the market and who is already in it, prior art (has this been done? by whom? what happened?), real numbers, technical constraints, and the strongest evidence against the idea. Output sourced study notes.` }],
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: MAX_SEARCHES_PER_STUDY }]
     });
     notes = `# Study notes: ${topic}\n` + (out.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
@@ -457,11 +468,15 @@ app.post('/api/study', (req, res) => {
   runStudySession(topic);
   res.json({ ok: true });
 });
-app.post('/api/autopilot', (req, res) => {
+app.post('/api/autopilot', async (req, res) => {
   if (state.running) return res.status(409).json({ error: 'a session is already running' });
   const mission = String((req.body || {}).mission || '').slice(0, 4000).trim();
   const cycles = Math.max(0, Math.min(1000, Number((req.body || {}).cycles) || 0)); // 0 = until DONE
   if (!mission) return res.status(400).json({ error: 'give them a mission' });
+  if (/^(keep going|continue|go|next|carry on|proceed|ok|yes|do it)[.! ]*$/i.test(mission)) {
+    if (state.mission) { state.keeperNotes.push('Keeper said: keep going.'); await saveKeeperNotes(); autopilot(state.mission, 0, true); return res.json({ ok: true, resumed: true }); }
+    const w = await wake('the Keeper said "' + mission + '" with no mission on file'); return res.json({ ok: true, woke: true, want: w.want || null, error: w.error });
+  }
   autopilot(mission, cycles);
   res.json({ ok: true });
 });
@@ -502,6 +517,7 @@ app.post('/api/reset', async (req, res) => {
   if (what.plan) { try { await fsp.unlink(PLAN); } catch {} done.push('plan'); }
   if (what.workshop) { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
   if (what.learned) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) if (/^learned-/.test(f)) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('learned notes'); }
+  if (what.dump) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('entire dump'); }
   state.transcript = []; state.topic = ''; state.mission = ''; state.done = false; state.cycle = 0; state.keeperNotes = [];
   try { await fsp.unlink(MISSION_FILE); } catch {} try { await fsp.unlink(KEEPER_NOTES); } catch {}
   res.json({ ok: true, wiped: done });

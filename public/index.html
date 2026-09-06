@@ -151,7 +151,8 @@ function speak(m){
 async function wipe(){
   const nb = confirm('Wipe the NOTEBOOK (their memory) and the master PLAN? (workshop files stay)'); if(!nb) return;
   const ws = confirm('ALSO delete the workshop (everything they built)? Cancel = keep the workshop.');
-  const r = await api('/api/reset',{method:'POST',body:JSON.stringify({notebook:true, plan:true, learned:false, workshop:ws})});
+  const dp = confirm('ALSO empty the knowledge dump (everything they have been fed, including old context files)? Cancel = keep it.');
+  const r = await api('/api/reset',{method:'POST',body:JSON.stringify({notebook:true, plan:true, learned:false, workshop:ws, dump:dp})});
   const d = await r.json().catch(()=>({})); alert(d.ok? 'wiped: '+d.wiped.join(', ') : (d.error||'could not wipe'));
   $('feed').innerHTML=''; lastLen=0; newTopic(); loadPlan(); loadLib(); loadWs();
 }
