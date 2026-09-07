@@ -11,12 +11,15 @@ const PORT = process.env.PORT || 3000;
 const KEY = (process.env.ANTHROPIC_API_KEY || '').trim();
 const PIN = (process.env.LAB_PIN || '').trim();
 const TEST = process.env.TEST_MODE === '1';           // canned replies, zero cost
-const MODEL = process.env.AVIARY_MODEL || 'claude-sonnet-4-5-20250929';
+const MODEL_CHEAP = process.env.AVIARY_MODEL_CHEAP || 'claude-haiku-4-5-20251001';
+const MODEL_STRONG = process.env.AVIARY_MODEL || 'claude-sonnet-4-5-20250929';
+const MODEL = MODEL_STRONG; // used by study/planner/reflect
+const MISSION_CALL_BUDGET = Number(process.env.MISSION_BUDGET || 120); // calls per mission before it pauses for you
 
 // ---- THE BUDGET LAWS ----
-const MAX_TURNS_PER_SESSION = Number(process.env.MAX_TURNS || 24);
+const MAX_TURNS_PER_SESSION = Number(process.env.MAX_TURNS || 12);
 const DAILY_CALL_CAP = Number(process.env.DAILY_CAP || 3000);
-const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 7000);
+const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 5000);
 const MAX_SEARCHES_PER_STUDY = Number(process.env.MAX_SEARCHES || 8);
 const PLAN = path.join(__dirname, 'plan.md');
 const WORKSHOP = path.join(__dirname, 'workshop');
@@ -119,7 +122,7 @@ async function workshopList() {
   await walk(WORKSHOP, '');
   return out.sort();
 }
-const EST_COST_PER_CALL = 0.012; // rough $ estimate per model call at these sizes (searches ~+0.01 each)
+const EST_COST_PER_CALL = 0.006; // rough blended $ per call now that most turns run on the cheap model
 
 const DATA = path.join(__dirname, 'data');
 const NOTEBOOK = path.join(__dirname, 'notebook.md');
@@ -154,7 +157,7 @@ const state = {
   partial: null,            // {agent, name, color, text} — the thought being typed right now
   speaking: null,           // agent name currently thinking
   error: null, done: false,
-  mission: '', cycle: 0, cycles: 0, autopilot: false, keeperNotes: []
+  mission: '', cycle: 0, cycles: 0, autopilot: false, keeperNotes: [], missionCalls: 0
 };
 const KEEPER_NOTES = path.join(DATA, 'keeper-notes.json');
 const MISSION_FILE = path.join(DATA, 'mission.txt');
@@ -168,6 +171,7 @@ async function usage() {
   return { day: new Date().toDateString(), calls: 0 };
 }
 async function bumpUsage() {
+  state.missionCalls = (state.missionCalls || 0) + 1;
   const u = await usage(); u.calls++;
   await fsp.mkdir(DATA, { recursive: true });
   await fsp.writeFile(path.join(DATA, 'usage.json'), JSON.stringify(u));
@@ -238,7 +242,7 @@ const TEST_LINES = [
   "Bench check.\n```run\nnode -e \"console.log('bench alive', 2+2)\"\nls\n```",
   "ANVIL shipping the scaffold now.\n```file:scoreboard/index.js\n// idea scoreboard — TEST MODE scaffold\nconst ideas = [];\nmodule.exports = { add: (t) => ideas.push({ t, score: 0 }), list: () => ideas };\n```\nKeeper: run `node -e \"console.log(require('./scoreboard'))\"` to smoke it."
 ];
-async function callAgent(messages, system, onDelta) {
+async function callAgent(messages, system, onDelta, model = MODEL_CHEAP) {
   if (TEST) {
     const line = TEST_LINES[testCounter++ % TEST_LINES.length];
     let acc = '';
@@ -250,7 +254,7 @@ async function callAgent(messages, system, onDelta) {
   for (let attempt = 0; attempt <= waits.length; attempt++) {
     let acc = '';
     try {
-      const stream = anthropic.messages.stream({ model: MODEL, max_tokens: MAX_TOKENS_PER_TURN, system, messages });
+      const stream = anthropic.messages.stream({ model, max_tokens: MAX_TOKENS_PER_TURN, system, messages });
       stream.on('text', (t) => { acc += t; onDelta && onDelta(acc); });
       const fin = await stream.finalMessage();
       if (!acc.trim() && attempt < waits.length) { await new Promise(r => setTimeout(r, waits[attempt])); continue; } // empty reply: breathe, retry
@@ -309,13 +313,13 @@ async function runTurns(turns) {
         `\n== SESSION TOPIC ==\n${state.topic}`,
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
         (state.keeperNotes.length ? `\n== THE KEEPER'S STANDING INSTRUCTIONS (obey these; newest last) ==\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''),
-        `\n== THE WORKSHOP (files the council has built so far) ==\n${(await workshopList()).join('\n') || '(empty — nothing built yet)'}`,
+        `\n== THE WORKSHOP (what exists, what works — READ BEFORE BUILDING; never rebuild what works) ==\n${(await workshopIndexText()) || ((await workshopList()).join('\n') || '(empty — nothing built yet)')}`,
         `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To read your own documents (PURPOSE, identity, constitution, notebook, plan, dump, proposals) run "snapshot-docs" — it copies them into docs/ inside the workshop. To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
       state.partial = { agent: agent.id, name: agent.name, color: agent.color, text: '' };
-      const text = await callAgent(convo, system, (acc) => { if (state.partial) state.partial.text = acc; });
+      const text = await callAgent(convo, system, (acc) => { if (state.partial) state.partial.text = acc; }, agent.id === 'skeptic' ? MODEL_STRONG : MODEL_CHEAP);
       await bumpUsage();
       state.partial = null; state.speaking = null;
       const files = await harvestFiles(text, agent.name);
@@ -373,6 +377,22 @@ async function study(topic) {
 async function planText() {
   try { return await fsp.readFile(PLAN, 'utf8'); } catch { return '(no plan yet — first cycle writes it)'; }
 }
+async function rewriteIndex() {
+  state.speaking = 'librarian';
+  const files = await workshopList();
+  let prev = ''; try { prev = await fsp.readFile(path.join(WORKSHOP, 'WORKSHOP-INDEX.md'), 'utf8'); } catch {}
+  const sys = readConstitution() + '\nYou are the council LIBRARIAN. Maintain WORKSHOP-INDEX.md: for EVERY file in the workshop, one line: path — what it does — status (WORKS on bench / UNTESTED / BROKEN: why) — how to run it. Keep entries from the previous index unless this cycle changed them. Then a short section "HOW THIS FITS TOGETHER" and "WHAT TO DO NEXT". This file is the council\'s memory of its own work — future missions read it first. Plain markdown, no fluff.';
+  const convo = [{ role: 'user', content: `FILES NOW IN THE WORKSHOP:\n${files.join('\n') || '(empty)'}\n\nPREVIOUS INDEX:\n${prev.slice(0, 5000)}\n\nTHIS CYCLE'S TRANSCRIPT (bench results are truth):\n${state.transcript.map(x => x.name + ': ' + x.text).join('\n\n').slice(0, 12000)}\n\nRewrite WORKSHOP-INDEX.md in full.` }];
+  try {
+    let text;
+    if (TEST) text = `# WORKSHOP INDEX (TEST)\n${files.map(f => '- ' + f + ' — test entry — UNTESTED').join('\n')}`;
+    else { const out = await anthropic.messages.create({ model: MODEL_CHEAP, max_tokens: 2500, system: sys, messages: convo }); text = (out.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim(); }
+    await bumpUsage();
+    if (text) { await fsp.mkdir(WORKSHOP, { recursive: true }); await fsp.writeFile(path.join(WORKSHOP, 'WORKSHOP-INDEX.md'), text, 'utf8'); }
+  } catch (e) { state.error = 'librarian failed: ' + String(e.message || e); }
+  state.speaking = null;
+}
+async function workshopIndexText() { try { return (await fsp.readFile(path.join(WORKSHOP, 'WORKSHOP-INDEX.md'), 'utf8')).slice(0, 6000); } catch { return ''; } }
 async function rewritePlan() {
   state.speaking = 'planner';
   const prev = await planText();
@@ -407,7 +427,7 @@ async function wake(reason) {
   MIND.lastWake = Date.now();
   state.speaking = 'wanting';
   const sys = readConstitution() + '\nYou are the whole council deciding what to WANT. Output ONLY JSON: {"mission": "<one clear mission, 2-5 sentences, bench-checkable, not obvious, within purpose>", "why": "<2 sentences>", "needs_keeper": "<what only the human can provide, or empty>"}';
-  const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nIDENTITY:\n${readIdentity()}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nLIBRARY: ${(await workshopList()).join(', ') || '(empty)'}\n\nWake reason: ${reason}. Choose the mission you most want to do next.` }];
+  const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nIDENTITY:\n${readIdentity()}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nWORKSHOP INDEX:\n${(await workshopIndexText()) || '(empty)'}\n\nWake reason: ${reason}. Choose the mission you most want to do next.` }];
   let want;
   try {
     if (TEST) want = { mission: 'TEST WANT: build a 20-line benchmark harness and beat a baseline on the bench', why: 'canned', needs_keeper: '' };
@@ -428,7 +448,7 @@ async function nextSubtopic() {
   return state.mission;
 }
 async function autopilot(mission, cycles, resume = false) {
-  if (!resume) { state.keeperNotes = []; await saveKeeperNotes(); }
+  if (!resume) { state.keeperNotes = []; await saveKeeperNotes(); state.missionCalls = 0; }
   state.mission = mission; state.cycles = cycles; state.cycle = 0; state.autopilot = true; state.killed = false; state.error = null;
   try { await fsp.mkdir(DATA, { recursive: true }); await fsp.writeFile(MISSION_FILE, mission, 'utf8'); } catch {}
   let failures = 0;
@@ -443,7 +463,12 @@ async function autopilot(mission, cycles, resume = false) {
     if (state.killed) break;
     await runTurns(MAX_TURNS_PER_SESSION);
     if (state.killed) break;
+    await rewriteIndex();
     await rewritePlan();
+    if (state.missionCalls >= MISSION_CALL_BUDGET) {
+      state.transcript.push({ agent: 'keeper', name: 'AUTOPILOT', emoji: '⏸️', color: '#888', text: `PAUSED — this mission has used ${state.missionCalls} calls (~$${(state.missionCalls * EST_COST_PER_CALL).toFixed(2)}). Read the plan and WORKSHOP-INDEX.md, then hit continue to buy another ${MISSION_CALL_BUDGET}.`, t: Date.now() });
+      state.missionCalls = 0; break;
+    }
     // hard stops: credit gone / repeated failures
     if (state.error && /credit|billing|insufficient|invalid.*key|authentication/i.test(state.error)) { state.error = 'STOPPED: ' + state.error + ' — add credit / check the key, then relaunch.'; break; }
     if (state.error) { failures++; if (failures >= 3) { state.error = 'STOPPED after 3 failing cycles: ' + state.error; break; } } else failures = 0;
@@ -537,7 +562,7 @@ app.post('/api/reset', async (req, res) => {
   const done = [];
   if (what.notebook) { await fsp.writeFile(NOTEBOOK, '', 'utf8'); done.push('notebook'); }
   if (what.plan) { try { await fsp.unlink(PLAN); } catch {} done.push('plan'); }
-  if (what.workshop) { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
+  if (what.workshop === 'DELETE EVERYTHING THEY BUILT') { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
   if (what.learned) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) if (/^learned-/.test(f)) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('learned notes'); }
   if (what.dump) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('entire dump'); }
   if (what.identity) { await fsp.writeFile(IDENTITY, SEED_IDENTITY, 'utf8'); done.push('identity (reset to seed)'); }
@@ -584,10 +609,11 @@ app.post('/api/steer', async (req, res) => {
   autopilot(state.mission, 0, true);
   res.json({ ok: true });
 });
-app.post('/api/say', (req, res) => {
+app.post('/api/say', async (req, res) => {
   const text = String((req.body || {}).text || '').slice(0, 4000).trim();
   if (!text) return res.status(400).json({ error: 'say something' });
   state.transcript.push({ agent: 'keeper', name: 'KEEPER', emoji: '👤', color: '#1A1A1A', text, t: Date.now() });
+  if (state.mission) { state.keeperNotes.push(text); await saveKeeperNotes(); } // survives cycle boundaries
   if (!state.running && state.topic) runTurns(Math.min(3, MAX_TURNS_PER_SESSION)); // wake them to answer you
   res.json({ ok: true });
 });

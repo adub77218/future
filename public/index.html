@@ -149,8 +149,8 @@ function speak(m){
   speechSynthesis.speak(u);
 }
 async function wipe(){
-  const nb = confirm('Wipe the NOTEBOOK (their memory) and the master PLAN? (workshop files stay)'); if(!nb) return;
-  const ws = confirm('ALSO delete the workshop (everything they built)? Cancel = keep the workshop.');
+  const nb = confirm('Wipe the NOTEBOOK and PLAN? The workshop (their code) is NOT touched by this. Continue?'); if(!nb) return;
+  let ws = false; if (confirm('Delete the WORKSHOP too? (everything they ever built — usually NO)')) { ws = prompt('Type exactly: DELETE EVERYTHING THEY BUILT') || false; }
   const dp = confirm('ALSO empty the knowledge dump (everything they have been fed, including old context files)? Cancel = keep it.');
   const idr = confirm('ALSO reset their IDENTITY to the seed (forget everything they believe about themselves)? Cancel = keep it.');
   const r = await api('/api/reset',{method:'POST',body:JSON.stringify({notebook:true, plan:true, learned:false, workshop:ws, dump:dp, identity:idr})});
@@ -193,7 +193,7 @@ async function poll(){
       window.scrollTo({top:document.body.scrollHeight});
     } else {
       $('live').style.display='none';
-      if(s.running && s.speaking){ $('thinking').textContent = (s.speaking==='scribe'?'the scribe is writing the notebook':s.speaking==='planner'?'the planner is rewriting the master plan':s.speaking==='reflection'?'the council is rewriting its identity':s.speaking==='wanting'?'the council is deciding what it wants':(s.speaking==='OWL'?'owl is researching':s.speaking.toLowerCase()+' is thinking'))+'…'; $('thinking').style.display='block'; }
+      if(s.running && s.speaking){ $('thinking').textContent = (s.speaking==='scribe'?'the scribe is writing the notebook':s.speaking==='librarian'?'the librarian is updating the workshop index':s.speaking==='planner'?'the planner is rewriting the master plan':s.speaking==='reflection'?'the council is rewriting its identity':s.speaking==='wanting'?'the council is deciding what it wants':(s.speaking==='OWL'?'owl is researching':s.speaking.toLowerCase()+' is thinking'))+'…'; $('thinking').style.display='block'; }
       else $('thinking').style.display='none';
     }
     running = !!s.running; haveMission = !!s.mission;

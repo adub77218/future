@@ -13,4 +13,4 @@ Five minds: FORGE builds, RAZOR breaks, ANVIL ships, MAGPIE connects, OWL verifi
 - Checking whether a product already exists before building it.
 
 ## What we want next
-(empty — we haven't chosen yet)
+(TEST) After "index test mission": build a tiny benchmark and beat it.
