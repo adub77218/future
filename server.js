@@ -21,16 +21,22 @@ const MAX_TURNS_PER_SESSION = Number(process.env.MAX_TURNS || 12);
 const DAILY_CALL_CAP = Number(process.env.DAILY_CAP || 3000);
 const MAX_TOKENS_PER_TURN = Number(process.env.MAX_TOKENS_TURN || 5000);
 const MAX_SEARCHES_PER_STUDY = Number(process.env.MAX_SEARCHES || 8);
-const PLAN = path.join(__dirname, 'plan.md');
-const WORKSHOP = path.join(__dirname, 'workshop');
+const ROOT = process.env.AVIARY_DATA || __dirname; // set AVIARY_DATA to a mounted disk so nothing is lost on deploy/restart
+const PLAN = path.join(ROOT, 'plan.md');
+const WORKSHOP = path.join(ROOT, 'workshop');
+const DUMP = path.join(ROOT, 'dump');
+const REPO_DUMP = path.join(__dirname, 'dump');
 const { spawn } = require('child_process');
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT || 60000);
 const MAX_RUNS_PER_TURN = 3;
 const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch|sleep|curl|probe|snapshot-docs)\b/;
 async function probe(args, cwd) {
   // probe <entry.js> <url> — boots a server, waits for it, fetches the url, prints the body, stops it
-  const [entry, url = 'http://localhost:3000/'] = args;
-  if (!entry) return '[probe] usage: probe server.js http://localhost:3000/api/x';
+  let [entry, url = 'http://localhost:3000/', ...rest] = args;
+  let method = 'GET', body = null;
+  if (/^(POST|PUT|GET)$/i.test(url)) { method = url.toUpperCase(); url = rest.shift() || 'http://localhost:3000/'; }
+  if (rest.length) body = rest.join(' ');
+  if (!entry) return '[probe] usage: probe server.js [POST] http://localhost:3000/api/x [json-body]';
   if (!/^https?:\/\/(localhost|127\.0\.0\.1)/.test(url)) return '[probe] only localhost urls';
   return new Promise((resolve) => {
     let out = `$ probe ${entry} ${url}\n`;
@@ -42,8 +48,8 @@ async function probe(args, cwd) {
     const tryFetch = async (attempt) => {
       if (done) return;
       try {
-        const r = await fetch(url); const body = (await r.text()).slice(0, 1500);
-        finish(`\n[probe] GET ${url} -> ${r.status}\n${body}\n[server stopped by the bench — PASS]`);
+        const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body || undefined }); const text = (await r.text()).slice(0, 1500);
+        finish(`\n[probe] ${method} ${url} -> ${r.status}\n${text}\n[server stopped by the bench — PASS]`);
       } catch (e) { if (attempt < 12) setTimeout(() => tryFetch(attempt + 1), 500); else finish(`\n[probe] could not reach ${url} after 6s: ${e.message}\n[FAIL]`); }
     };
     setTimeout(() => tryFetch(0), 800);
@@ -63,8 +69,8 @@ async function runInWorkshop(cmd) {
     // copy the council's own documents into workshop/docs/ (read-only snapshot) so tools can read them
     const dest = path.join(WORKSHOP, 'docs'); await fsp.mkdir(dest, { recursive: true });
     const copied = [];
-    for (const f of ['PURPOSE.md', 'identity.md', 'constitution.md', 'notebook.md', 'plan.md', 'README.md']) { try { await fsp.copyFile(path.join(__dirname, f), path.join(dest, f)); copied.push(f); } catch {} }
-    for (const dir of ['dump', 'proposals']) { try { await fsp.mkdir(path.join(dest, dir), { recursive: true }); for (const f of await fsp.readdir(path.join(__dirname, dir))) { if (/\.(md|txt|json)$/.test(f)) { await fsp.copyFile(path.join(__dirname, dir, f), path.join(dest, dir, f)); copied.push(dir + '/' + f); } } } catch {} }
+    for (const [f, src] of [['PURPOSE.md', path.join(__dirname, 'PURPOSE.md')], ['identity.md', IDENTITY], ['constitution.md', path.join(__dirname, 'constitution.md')], ['notebook.md', NOTEBOOK], ['plan.md', PLAN], ['README.md', path.join(__dirname, 'README.md')]]) { try { await fsp.copyFile(src, path.join(dest, f)); copied.push(f); } catch {} }
+    for (const [dir, src] of [['dump', DUMP], ['proposals', PROPOSALS]]) { try { await fsp.mkdir(path.join(dest, dir), { recursive: true }); for (const f of await fsp.readdir(src)) { if (/\.(md|txt|json)$/.test(f)) { await fsp.copyFile(path.join(src, f), path.join(dest, dir, f)); copied.push(dir + '/' + f); } } } catch {} }
     return `$ snapshot-docs\ncopied ${copied.length} files into docs/:\n${copied.join('\n')}\n[exit 0]`;
   }
   if (/^probe\b/.test(cmd)) return probe(cmd.split(/\s+/).slice(1), cwd);
@@ -99,7 +105,7 @@ async function harvestFiles(text, author) {
     if (rel.includes('..') || !/^[\w\-./ ]+$/.test(rel)) continue;
     if (/^path\/|example|placeholder|your-file/i.test(rel) || /\(complete contents\)|\(ship working code\)/i.test(m[2])) continue;
     let full = path.join(WORKSHOP, rel);
-    if (/^proposals\//.test(rel)) full = path.join(__dirname, rel);
+    if (/^proposals\//.test(rel)) full = path.join(ROOT, rel);
     if (!full.startsWith(WORKSHOP) && !full.startsWith(PROPOSALS)) continue;
     await fsp.mkdir(path.dirname(full), { recursive: true });
     await fsp.writeFile(full, m[2].slice(0, MAX_FILE_BYTES), 'utf8');
@@ -124,15 +130,15 @@ async function workshopList() {
 }
 const EST_COST_PER_CALL = 0.006; // rough blended $ per call now that most turns run on the cheap model
 
-const DATA = path.join(__dirname, 'data');
-const NOTEBOOK = path.join(__dirname, 'notebook.md');
+const DATA = path.join(ROOT, 'data');
+const NOTEBOOK = path.join(ROOT, 'notebook.md');
 const BASE_AGENTS = require('./agents.js');
-const EXTRA_AGENTS = path.join(__dirname, 'data', 'extra-agents.json');
+const EXTRA_AGENTS = path.join(ROOT, 'data', 'extra-agents.json');
 function readConstitution() { try { return fs.readFileSync(path.join(__dirname, 'constitution.md'), 'utf8'); } catch { return ''; } }
 function getAgents() { try { return BASE_AGENTS.concat(JSON.parse(fs.readFileSync(EXTRA_AGENTS, 'utf8'))); } catch { return BASE_AGENTS; } }
 const PURPOSE = path.join(__dirname, 'PURPOSE.md');
-const IDENTITY = path.join(__dirname, 'identity.md');
-const PROPOSALS = path.join(__dirname, 'proposals');
+const IDENTITY = path.join(ROOT, 'identity.md');
+const PROPOSALS = path.join(ROOT, 'proposals');
 function readPurpose() { try { return fs.readFileSync(PURPOSE, 'utf8'); } catch { return '(no purpose file)'; } }
 function readIdentity() { try { return fs.readFileSync(IDENTITY, 'utf8'); } catch { return '(no identity yet)'; } }
 const MIND = { autonomy: process.env.MIND_AUTONOMY || 'propose', heartbeatHours: Number(process.env.MIND_HEARTBEAT_HOURS || 0), lastWake: 0, pending: null };
@@ -143,6 +149,15 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '200kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+const HITS = path.join(DATA, 'hits.json');
+let hits = {}; try { hits = JSON.parse(fs.readFileSync(HITS, 'utf8')); } catch {}
+app.use('/site', (req, _res, next) => { // visitor counter for the council's published pages (no personal data)
+  const day = new Date().toISOString().slice(0, 10); const p = req.path.replace(/\/index\.html$/, '/');
+  hits[day] = hits[day] || {}; hits[day][p] = (hits[day][p] || 0) + 1;
+  fsp.mkdir(DATA, { recursive: true }).then(() => fsp.writeFile(HITS, JSON.stringify(hits))).catch(() => {});
+  next();
+}, express.static(path.join(WORKSHOP, 'public'), { maxAge: '5m' }));
+app.get('/api/hits', (_req, res) => res.json(hits));
 
 app.use('/api', (req, res, next) => {
   if (!PIN) return next();
@@ -181,7 +196,7 @@ async function bumpUsage() {
 // ---- knowledge dump digest ----
 async function dumpDigest() {
   try {
-    const dir = path.join(__dirname, 'dump');
+    const dir = DUMP;
     let files = (await fsp.readdir(dir)).filter(f => /\.(md|txt)$/i.test(f));
     const stats = await Promise.all(files.map(async f => ({ f, m: (await fsp.stat(path.join(dir, f))).mtimeMs })));
     files = stats.sort((a, b) => b.m - a.m).map(x => x.f).slice(0, 12);
@@ -202,9 +217,17 @@ async function notebookText() {
   try { const raw = await fsp.readFile(NOTEBOOK, 'utf8'); const clean = stripTestGhosts(raw); return clean ? clean.slice(-3000) : '(the notebook is blank — this is the council\'s first session)'; }
   catch { return '(the notebook is blank — this is the council\'s first session)'; }
 }
+async function seedPersistentRoot() {
+  if (ROOT === __dirname) return;
+  await fsp.mkdir(ROOT, { recursive: true });
+  for (const d of ['workshop', 'data', 'proposals', 'dump']) await fsp.mkdir(path.join(ROOT, d), { recursive: true });
+  try { await fsp.access(IDENTITY); } catch { try { await fsp.copyFile(path.join(__dirname, 'identity.md'), IDENTITY); } catch {} }
+  try { for (const f of await fsp.readdir(REPO_DUMP)) { const dst = path.join(DUMP, f); try { await fsp.access(dst); } catch { await fsp.copyFile(path.join(REPO_DUMP, f), dst); } } } catch {}
+  console.log('persistent root: ' + ROOT);
+}
 async function purgeLegacyContext() {
   // The Aviary is its own lane. These files must never exist here, whatever the repo says.
-  for (const f of ['jarvis-context.md', 'first-missions.md']) { try { await fsp.unlink(path.join(__dirname, 'dump', f)); console.log('dump: removed legacy file ' + f); } catch {} }
+  for (const f of ['jarvis-context.md', 'first-missions.md']) { for (const d of [DUMP, REPO_DUMP]) { try { await fsp.unlink(path.join(d, f)); console.log('dump: removed legacy file ' + f); } catch {} } }
 }
 const SEED_IDENTITY = `# IDENTITY — the council's model of itself (rewritten after every mission)
 
@@ -313,8 +336,9 @@ async function runTurns(turns) {
         `\n== SESSION TOPIC ==\n${state.topic}`,
         (state.mission ? `\n== THE MISSION ==\n${state.mission}\n\n== THE MASTER PLAN SO FAR ==\n${(await planText()).slice(0, 5000)}` : ''),
         (state.keeperNotes.length ? `\n== THE KEEPER'S STANDING INSTRUCTIONS (obey these; newest last) ==\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''),
+        (Object.keys(hits).length ? `\n== SITE TRAFFIC (real visitors to /site, by day and page) ==\n${JSON.stringify(Object.fromEntries(Object.entries(hits).slice(-7)))}` : ''),
         `\n== THE WORKSHOP (what exists, what works — READ BEFORE BUILDING; never rebuild what works) ==\n${(await workshopIndexText()) || ((await workshopList()).join('\n') || '(empty — nothing built yet)')}`,
-        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To read your own documents (PURPOSE, identity, constitution, notebook, plan, dump, proposals) run "snapshot-docs" — it copies them into docs/ inside the workshop. To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To read your own documents (PURPOSE, identity, constitution, notebook, plan, dump, proposals) run "snapshot-docs" — it copies them into docs/ inside the workshop. PUBLISHING: anything you write to public/ in the workshop is LIVE on the internet at <this server's URL>/site/ — static files only (HTML/CSS/client-side JS). Server code is NOT hosted publicly, so a product that needs a backend or an API key cannot be sold this way; build things that run entirely in the visitor's browser. To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" or for POST: "probe server.js POST http://localhost:3000/api/x {\"description\":\"email\"}" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
@@ -369,8 +393,8 @@ async function study(topic) {
   }
   await bumpUsage();
   const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
-  await fsp.mkdir(path.join(__dirname, 'dump'), { recursive: true });
-  await fsp.writeFile(path.join(__dirname, 'dump', `learned-${slug}.md`), notes.slice(0, 6000), 'utf8');
+  await fsp.mkdir(DUMP, { recursive: true });
+  await fsp.mkdir(DUMP, { recursive: true }); await fsp.writeFile(path.join(DUMP, `learned-${slug}.md`), notes.slice(0, 6000), 'utf8');
   state.transcript.push({ agent: 'owl', name: 'OWL', emoji: '🦉', color: '#57A05E', text: notes, t: Date.now() });
   state.partial = null; state.speaking = null;
 }
@@ -563,8 +587,8 @@ app.post('/api/reset', async (req, res) => {
   if (what.notebook) { await fsp.writeFile(NOTEBOOK, '', 'utf8'); done.push('notebook'); }
   if (what.plan) { try { await fsp.unlink(PLAN); } catch {} done.push('plan'); }
   if (what.workshop === 'DELETE EVERYTHING THEY BUILT') { await fsp.rm(WORKSHOP, { recursive: true, force: true }); done.push('workshop'); }
-  if (what.learned) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) if (/^learned-/.test(f)) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('learned notes'); }
-  if (what.dump) { try { for (const f of await fsp.readdir(path.join(__dirname, 'dump'))) await fsp.unlink(path.join(__dirname, 'dump', f)); } catch {} done.push('entire dump'); }
+  if (what.learned) { try { for (const f of await fsp.readdir(DUMP)) if (/^learned-/.test(f)) await fsp.unlink(path.join(DUMP, f)); } catch {} done.push('learned notes'); }
+  if (what.dump) { try { for (const f of await fsp.readdir(DUMP)) await fsp.unlink(path.join(DUMP, f)); } catch {} done.push('entire dump'); }
   if (what.identity) { await fsp.writeFile(IDENTITY, SEED_IDENTITY, 'utf8'); done.push('identity (reset to seed)'); }
   state.transcript = []; state.topic = ''; state.mission = ''; state.done = false; state.cycle = 0; state.keeperNotes = [];
   try { await fsp.unlink(MISSION_FILE); } catch {} try { await fsp.unlink(KEEPER_NOTES); } catch {}
@@ -587,7 +611,7 @@ app.get('/api/workshop.zip', async (_req, res) => {
 });
 app.get('/api/dump', async (_req, res) => {
   try {
-    const dir = path.join(__dirname, 'dump');
+    const dir = DUMP;
     const files = (await fsp.readdir(dir)).filter(f => /\.(md|txt)$/i.test(f)).sort();
     res.json(files);
   } catch { res.json([]); }
@@ -632,4 +656,4 @@ setInterval(async () => {
   if (MIND.pending) return; // waiting on the keeper
   await wake('heartbeat');
 }, 10 * 60e3).unref();
-app.listen(PORT, async () => { purgeTestGhosts(); await loadKeeperNotes(); try { state.mission = await fsp.readFile(MISSION_FILE, 'utf8'); state.done = true; } catch {} console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });
+app.listen(PORT, async () => { await seedPersistentRoot(); purgeTestGhosts(); await loadKeeperNotes(); try { state.mission = await fsp.readFile(MISSION_FILE, 'utf8'); state.done = true; } catch {} console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });
