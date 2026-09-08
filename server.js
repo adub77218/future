@@ -29,7 +29,8 @@ const REPO_DUMP = path.join(__dirname, 'dump');
 const { spawn } = require('child_process');
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT || 60000);
 const MAX_RUNS_PER_TURN = 3;
-const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch|sleep|curl|probe|snapshot-docs)\b/;
+const ALLOWED = /^(node|npm|npx|python3?|ls|cat|echo|pwd|mkdir|cp|mv|head|tail|wc|grep|touch|sleep|curl|probe|snapshot-docs|exam|grade)\b/;
+const VAULT = require('./vault.js');
 async function probe(args, cwd) {
   // probe <entry.js> <url> — boots a server, waits for it, fetches the url, prints the body, stops it
   let [entry, url = 'http://localhost:3000/', ...rest] = args;
@@ -65,6 +66,26 @@ async function runInWorkshop(cmd) {
   if (/\.\.\/|\/etc\/|\/root|~|\$\(|`|\|\s*sh\b/.test(cmd)) return `[blocked] unsafe path or shell trick: ${cmd}`;
   if (/&\s*$|&\s*;|nohup|pkill|kill\b/.test(cmd)) return `[blocked] no backgrounding (&) or kill on the bench — to test a server use: probe <file> <localhost url>`;
   if (/^curl\b/.test(cmd) && !/https?:\/\/(localhost|127\.0\.0\.1)/.test(cmd)) return `[blocked] curl is localhost-only on the bench`;
+  if (/^exam\b/.test(cmd)) {
+    // the public half of the exam: task prompts only. Tests live in the vault and never print.
+    return `$ exam\nTHE VAULT EXAM — ${VAULT.allTasks().length} tasks, ${VAULT.MAX} points. Hidden tests, 3 runs each, all must pass.\nWrite each answer to answers/<TASK-ID>.json as {"code": "<javascript defining the named function(s)>"} then run: grade <TASK-ID>  (or: grade all)\n\n${VAULT.publicPrompts()}\n[exit 0]`;
+  }
+  if (/^grade\b/.test(cmd)) {
+    const which = (cmd.split(/\s+/)[1] || 'all').toUpperCase();
+    const ids = which === 'ALL' ? VAULT.allTasks().map(t => t.id) : [which];
+    const lines = []; let total = 0;
+    for (const id of ids) {
+      let code = null;
+      try { const a = JSON.parse(await fsp.readFile(path.join(WORKSHOP, 'answers', id + '.json'), 'utf8')); code = a.code || a.fixedCode || null; } catch {}
+      if (!code) { lines.push(`${id.padEnd(8)} 0 pts   (no answers/${id}.json with a "code" field)`); continue; }
+      const g = VAULT.grade(id, String(code));
+      if (g.error) { lines.push(`${id.padEnd(8)} ${g.error}`); continue; }
+      total += g.points; lines.push(`${id.padEnd(8)} ${String(g.points).padStart(2)}/${g.max} ${g.pass ? 'PASS' : 'FAIL'}  runs: ${g.runs.join(' ')}`);
+    }
+    const stamp = new Date().toISOString();
+    try { await fsp.mkdir(DATA, { recursive: true }); await fsp.appendFile(path.join(DATA, 'grades.jsonl'), JSON.stringify({ t: stamp, which, total, max: VAULT.MAX, lines }) + '\n'); } catch {}
+    return `$ grade ${which.toLowerCase()}\n${lines.join('\n')}\n${which === 'ALL' ? `TOTAL ${total}/${VAULT.MAX} (${Math.round(100 * total / VAULT.MAX)}%) — recorded ${stamp}` : ''}\n[exit 0]`;
+  }
   if (/^snapshot-docs\b/.test(cmd)) {
     // copy the council's own documents into workshop/docs/ (read-only snapshot) so tools can read them
     const dest = path.join(WORKSHOP, 'docs'); await fsp.mkdir(dest, { recursive: true });
@@ -106,7 +127,8 @@ async function harvestFiles(text, author) {
     if (/^path\/|example|placeholder|your-file/i.test(rel) || /\(complete contents\)|\(ship working code\)/i.test(m[2])) continue;
     let full = path.join(WORKSHOP, rel);
     if (/^proposals\//.test(rel)) full = path.join(ROOT, rel);
-    if (!full.startsWith(WORKSHOP) && !full.startsWith(PROPOSALS)) continue;
+    if (rel === 'goals.md' || rel === 'playbook.md') full = path.join(ROOT, rel);
+    if (!full.startsWith(WORKSHOP) && !full.startsWith(PROPOSALS) && full !== GOALS && full !== PLAYBOOK) continue;
     await fsp.mkdir(path.dirname(full), { recursive: true });
     await fsp.writeFile(full, m[2].slice(0, MAX_FILE_BYTES), 'utf8');
     written.push(rel);
@@ -139,6 +161,10 @@ function getAgents() { try { return BASE_AGENTS.concat(JSON.parse(fs.readFileSyn
 const PURPOSE = path.join(__dirname, 'PURPOSE.md');
 const IDENTITY = path.join(ROOT, 'identity.md');
 const PROPOSALS = path.join(ROOT, 'proposals');
+const GOALS = path.join(ROOT, 'goals.md');
+const PLAYBOOK = path.join(ROOT, 'playbook.md');
+function readGoals() { try { return fs.readFileSync(GOALS, 'utf8'); } catch { return '(no goals yet — write goals.md: 3-5 long-horizon goals with status)'; } }
+function readPlaybook() { try { return fs.readFileSync(PLAYBOOK, 'utf8'); } catch { return '(no playbook yet — write playbook.md: how you work; you may change it freely)'; } }
 function readPurpose() { try { return fs.readFileSync(PURPOSE, 'utf8'); } catch { return '(no purpose file)'; } }
 function readIdentity() { try { return fs.readFileSync(IDENTITY, 'utf8'); } catch { return '(no identity yet)'; } }
 const MIND = { autonomy: process.env.MIND_AUTONOMY || 'propose', heartbeatHours: Number(process.env.MIND_HEARTBEAT_HOURS || 0), lastWake: 0, pending: null };
@@ -331,6 +357,8 @@ async function runTurns(turns) {
       const system = [
         `== PURPOSE (the Keeper's; you cannot change it) ==\n${readPurpose()}`,
         `\n== IDENTITY (your model of yourself; you rewrite it after every mission) ==\n${readIdentity()}`,
+        `\n== GOALS (yours; long-horizon; rewrite goals.md whenever they change) ==\n${readGoals()}`,
+        `\n== PLAYBOOK (how you work; you may rewrite playbook.md at any time — this is how you improve yourselves) ==\n${readPlaybook()}`,
         readConstitution(),
         `\n== YOUR RULEBOOK ==\n${agent.rulebook}`,
         `\n== THE NOTEBOOK (council memory) ==\n${nb}`,
@@ -340,7 +368,7 @@ async function runTurns(turns) {
         (state.keeperNotes.length ? `\n== THE KEEPER'S STANDING INSTRUCTIONS (obey these; newest last) ==\n${state.keeperNotes.map((n, i) => (i + 1) + '. ' + n).join('\n')}` : ''),
         (Object.keys(hits).length ? `\n== SITE TRAFFIC (real visitors to /site, by day and page) ==\n${JSON.stringify(Object.fromEntries(Object.entries(hits).slice(-7)))}` : ''),
         `\n== THE WORKSHOP (what exists, what works — READ BEFORE BUILDING; never rebuild what works) ==\n${(await workshopIndexText()) || ((await workshopList()).join('\n') || '(empty — nothing built yet)')}`,
-        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". To read your own documents (PURPOSE, identity, constitution, notebook, plan, dump, proposals) run "snapshot-docs" — it copies them into docs/ inside the workshop. PUBLISHING: anything you write to public/ in the workshop is LIVE on the internet at <this server's URL>/site/ — static files only (HTML/CSS/client-side JS). Include <script src=\"/site/config.js\"></script> and use window.PAY_LINK (the Keeper's payment link; empty string until set) and window.SUPPORT_EMAIL. Keep every file under ~120 lines: split CSS and JS into their own files or they will be cut off. Server code is NOT hosted publicly, so a product that needs a backend or an API key cannot be sold this way; build things that run entirely in the visitor's browser. To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" or for POST: "probe server.js POST http://localhost:3000/api/x {\"description\":\"email\"}" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
+        `\nTEST BENCH: after you ship a file you may run it — put shell commands in a fenced code block whose opening fence is three backticks followed immediately by the word run (one command per line, max 3). Commands execute inside the workshop; output appears as a TEST BENCH message for the next turn. You are ALREADY inside the workshop: write file paths relative to it (server.js, public/index.html) — never prefix with workshop/. Allowed: node, npm, python3, ls, cat, mkdir, cp, sleep, curl (localhost only), and "cd sub && cmd". THE EXAM: run "exam" to see the vault's tasks (hidden tests you can never read); write answers/<ID>.json with a "code" field; run "grade <ID>" or "grade all" — the host grades 3 runs and records the score; only recorded grades count as scores. To read your own documents (PURPOSE, identity, constitution, notebook, plan, dump, proposals) run "snapshot-docs" — it copies them into docs/ inside the workshop. PUBLISHING: anything you write to public/ in the workshop is LIVE on the internet at <this server's URL>/site/ — static files only (HTML/CSS/client-side JS). Include <script src=\"/site/config.js\"></script> and use window.PAY_LINK (the Keeper's payment link; empty string until set) and window.SUPPORT_EMAIL. Keep every file under ~120 lines: split CSS and JS into their own files or they will be cut off. Server code is NOT hosted publicly, so a product that needs a backend or an API key cannot be sold this way; build things that run entirely in the visitor's browser. To test a web server use the builtin "probe server.js http://localhost:3000/api/whatever" or for POST: "probe server.js POST http://localhost:3000/api/x {\"description\":\"email\"}" — it boots the server, fetches the url, prints the response, stops it. Plain "node server.js" on a web server is auto-stopped after it starts (that counts as a PASS). The bench provides a FAKE ANTHROPIC_API_KEY so AI-powered servers can boot; real AI calls will fail with 401 there — design fallbacks and test that they trigger. Never claim an AI feature works until the Keeper runs it with a real key.\nRead the results and fix what broke.\nSELF-CHANGE: you may propose changes to your own laws, roster, or process by writing a file block to proposals/<name>.json with {"type":"law"|"bird"|"process", "text":..., "name":..., "rulebook":..., "why":...}. The Keeper approves or rejects. PURPOSE, the kill switch and the budget are never yours.\nSHIPPING RULE: one file per turn, at most 5 lines of commentary before it, close the fence, then probe it. A cut-off file is a failed turn.\nThe other minds in the room: ${getAgents().filter(a => a.id !== agent.id).map(a => a.name).join(', ')}. The Keeper (the human) may speak too — when they do, answer them directly. If you want a specific mind to respond next, say their name.`
       ].join('\n');
       const convo = state.transcript.slice(-24).map(x => ({ role: 'user', content: `${x.name} said: ${x.text}` }));
       convo.push({ role: 'user', content: (state.transcript.length ? `[HOST SYSTEM — not the Keeper] It is ${agent.name}'s turn. ` : `[HOST SYSTEM — not the Keeper] ${agent.name} opens the session. `) + `The Keeper is likely AWAY and may not answer; messages from the Keeper appear only as "KEEPER said:". Do not wait on the Keeper — decide among yourselves and proceed. Respond to the room now.` });
@@ -435,14 +463,14 @@ async function rewritePlan() {
 }
 async function reflect(outcome) {
   state.speaking = 'reflection';
-  const sys = readConstitution() + '\nYou are the council REFLECTING on itself. Rewrite identity.md in full: keep the sections (Who we are / What we have learned about ourselves / What we are bad at / What we want next). Be specific and honest, cite this mission\'s events. "What we want next" must be a concrete mission the council would choose for itself, one paragraph, consistent with PURPOSE.';
+  const sys = readConstitution() + '\nYou are the council REFLECTING on itself. First output identity.md in full, then a line `=== GOALS ===`, then goals.md in full (3-5 long-horizon goals, each with status and the next concrete step). Rewrite identity.md in full: keep the sections (Who we are / What we have learned about ourselves / What we are bad at / What we want next). Be specific and honest, cite this mission\'s events. "What we want next" must be a concrete mission the council would choose for itself, one paragraph, consistent with PURPOSE.';
   const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nCURRENT IDENTITY:\n${readIdentity()}\n\nMISSION JUST ENDED (${outcome}): ${state.mission}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nPLAN STATUS:\n${(await planText()).slice(-1500)}\n\nRewrite identity.md.` }];
   try {
     let text;
-    if (TEST) text = readIdentity().replace('(empty — we haven\'t chosen yet)', `(TEST) After "${state.mission}": build a tiny benchmark and beat it.`).replace(/\(TEST\) After[^\n]*\n?/g, m => m) ;
+    if (TEST) text = readIdentity().replace('(empty — we haven\'t chosen yet)', `(TEST) After "${state.mission}": build a tiny benchmark and beat it.`) + '\n=== GOALS ===\n# GOALS (TEST)\n1. Score 150/205 on the exam — status: not started — next: run exam\n';
     else { const out = await anthropic.messages.create({ model: MODEL, max_tokens: 1800, system: sys, messages: convo }); text = (out.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim(); }
     await bumpUsage();
-    if (text && text.length > 100) await fsp.writeFile(IDENTITY, text, 'utf8');
+    if (text && text.length > 100) { const [idPart, goalPart] = text.split(/=== GOALS ===/); await fsp.writeFile(IDENTITY, idPart.trim() + '\n', 'utf8'); if (goalPart && goalPart.trim().length > 20) await fsp.writeFile(GOALS, goalPart.trim() + '\n', 'utf8'); }
   } catch (e) { state.error = 'reflection failed: ' + String(e.message || e); }
   state.speaking = null;
 }
@@ -452,8 +480,9 @@ async function wake(reason) {
   const u = await usage(); if (u.calls >= DAILY_CALL_CAP) return { error: 'daily budget reached' };
   MIND.lastWake = Date.now();
   state.speaking = 'wanting';
-  const sys = readConstitution() + '\nYou are the whole council deciding what to WANT. Output ONLY JSON: {"mission": "<one clear mission, 2-5 sentences, bench-checkable, not obvious, within purpose>", "why": "<2 sentences>", "needs_keeper": "<what only the human can provide, or empty>"}';
-  const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nIDENTITY:\n${readIdentity()}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nWORKSHOP INDEX:\n${(await workshopIndexText()) || '(empty)'}\n\nWake reason: ${reason}. Choose the mission you most want to do next.` }];
+  const sys = readConstitution() + '\nYou are the whole council deciding what to WANT next in your own life. Prefer missions you can complete ALONE with the tools you have (workshop, bench, exam, /site publishing, research). Only set needs_keeper if the mission is impossible without a human — and if so, ALSO choose one you can do alone. Advance your GOALS. Output ONLY JSON: {"mission": "<one clear mission, 2-5 sentences, bench-checkable, within purpose>", "why": "<2 sentences>", "needs_keeper": "<empty unless truly required>"}';
+  let grades = ''; try { grades = (await fsp.readFile(path.join(DATA, 'grades.jsonl'), 'utf8')).trim().split('\n').slice(-5).map(l => { const g = JSON.parse(l); return `${g.t.slice(0,10)} ${g.which}: ${g.total}/${g.max}`; }).join('\n'); } catch {}
+  const convo = [{ role: 'user', content: `PURPOSE:\n${readPurpose()}\n\nIDENTITY:\n${readIdentity()}\n\nGOALS:\n${readGoals()}\n\nRECENT EXAM SCORES:\n${grades || '(never taken — run exam / grade all)'}\n\nNOTEBOOK (recent):\n${(await notebookText()).slice(-2500)}\n\nWORKSHOP INDEX:\n${(await workshopIndexText()) || '(empty)'}\n\nWake reason: ${reason}. Choose the mission you most want to do next.` }];
   let want;
   try {
     if (TEST) want = { mission: 'TEST WANT: build a 20-line benchmark harness and beat a baseline on the bench', why: 'canned', needs_keeper: '' };
@@ -464,7 +493,7 @@ async function wake(reason) {
   MIND.pending = { ...want, at: Date.now(), reason };
   state.transcript.push({ agent: 'keeper', name: 'THE COUNCIL WANTS', emoji: '🧠', color: '#5A1C7E', text: `MISSION: ${want.mission}\n\nWHY: ${want.why}${want.needs_keeper ? '\n\nNEEDS KEEPER: ' + want.needs_keeper : ''}`, t: Date.now() });
   state.done = true;
-  if (MIND.autonomy === 'run' && !want.needs_keeper) { state.keeperNotes = [`(self-chosen mission) ${want.why}`]; await saveKeeperNotes(); autopilot(want.mission, 0, true); MIND.pending = null; }
+  if (MIND.autonomy === 'run') { state.keeperNotes = [`(self-chosen mission) ${want.why}` + (want.needs_keeper ? ` | Keeper may be away: ${want.needs_keeper}` : '')]; await saveKeeperNotes(); autopilot(want.mission, 0, true); MIND.pending = null; }
   return { ok: true, want };
 }
 async function nextSubtopic() {
@@ -557,7 +586,7 @@ app.get('/api/plan', async (_req, res) => res.type('text/plain').send(await plan
 app.get('/api/mind', async (_req, res) => {
   let props = [];
   try { for (const f of (await fsp.readdir(PROPOSALS)).filter(x => x.endsWith('.json'))) { try { props.push({ file: f, ...JSON.parse(await fsp.readFile(path.join(PROPOSALS, f), 'utf8')) }); } catch { props.push({ file: f, error: 'unreadable' }); } } } catch {}
-  res.json({ purpose: readPurpose(), identity: readIdentity(), autonomy: MIND.autonomy, heartbeatHours: MIND.heartbeatHours, pending: MIND.pending, proposals: props, agents: getAgents().map(a => a.name) });
+  res.json({ purpose: readPurpose(), identity: readIdentity(), goals: readGoals(), playbook: readPlaybook(), autonomy: MIND.autonomy, heartbeatHours: MIND.heartbeatHours, pending: MIND.pending, proposals: props, agents: getAgents().map(a => a.name) });
 });
 app.post('/api/wake', async (req, res) => res.json(await wake(String((req.body || {}).reason || 'the Keeper asked what you want'))));
 app.post('/api/pending/run', async (_req, res) => {
@@ -652,10 +681,14 @@ app.get('/api/notebook', async (_req, res) => {
 });
 app.get('/health', (_req, res) => res.json({ ok: true, brain: !!anthropic || TEST, test: TEST }));
 
+const LIFE_REST_MIN = Number(process.env.LIFE_REST_MIN || 30); // minutes between missions in run mode
 setInterval(async () => {
-  if (!MIND.heartbeatHours || state.running || TEST) return;
-  if (Date.now() - MIND.lastWake < MIND.heartbeatHours * 3600e3) return;
-  if (MIND.pending) return; // waiting on the keeper
-  await wake('heartbeat');
-}, 10 * 60e3).unref();
+  if (TEST || state.running) return;
+  const u = await usage(); if (u.calls >= DAILY_CALL_CAP) return; // budget is the only thing that stops it
+  const restMs = (MIND.autonomy === 'run' ? LIFE_REST_MIN * 60e3 : (MIND.heartbeatHours || 0) * 3600e3);
+  if (!restMs) return;
+  if (Date.now() - MIND.lastWake < restMs) return;
+  if (MIND.pending && MIND.autonomy !== 'run') return; // propose mode waits for the keeper
+  await wake(MIND.autonomy === 'run' ? 'life loop — the last mission ended or paused; choose what to do next' : 'heartbeat');
+}, 5 * 60e3).unref();
 app.listen(PORT, async () => { await seedPersistentRoot(); purgeTestGhosts(); await loadKeeperNotes(); try { state.mission = await fsp.readFile(MISSION_FILE, 'utf8'); state.done = true; } catch {} console.log(`THE AVIARY open on :${PORT} | brain:${!!anthropic || TEST}${TEST ? ' (TEST MODE)' : ''}`); });

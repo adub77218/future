@@ -45,7 +45,9 @@
       <button id="rejPending" onclick="pend('reject')" style="display:none;background:#fff;color:#C0392B;border:1px solid #E8B4AC;padding:8px 14px">no</button>
       <button onclick="toggleAuto()" id="autoBtn" style="background:#F2F2F2;color:#333;padding:8px 14px">autonomy: …</button>
     </div>
-    <details style="margin-top:8px"><summary style="font-size:12px;color:#888">identity (their self-model)</summary><pre id="identity">…</pre></details>
+    <details style="margin-top:8px"><summary style="font-size:12px;color:#888">goals (theirs, long-horizon)</summary><pre id="goals">…</pre></details>
+    <details style="margin-top:4px"><summary style="font-size:12px;color:#888">playbook (how they work — they rewrite it)</summary><pre id="playbook">…</pre></details>
+    <details style="margin-top:4px"><summary style="font-size:12px;color:#888">identity (their self-model)</summary><pre id="identity">…</pre></details>
     <details style="margin-top:4px"><summary style="font-size:12px;color:#888">purpose (yours; edit PURPOSE.md in the repo)</summary><pre id="purpose">…</pre></details>
     <div id="proposals" style="margin-top:8px"></div>
   </details>
@@ -115,7 +117,7 @@ async function loadMind(){
   try{
     const r = await api('/api/mind'); const m = await r.json();
     mindAuto = m.autonomy; $('autoBtn').textContent = 'autonomy: ' + (m.autonomy==='run' ? 'RUN what it wants' : 'PROPOSE, I approve');
-    $('identity').textContent = m.identity; $('purpose').textContent = m.purpose;
+    $('identity').textContent = m.identity; $('purpose').textContent = m.purpose; $('goals').textContent = m.goals || ''; $('playbook').textContent = m.playbook || '';
     $('mindstate').textContent = m.pending ? 'wants something — your call' : (m.heartbeatHours ? 'heartbeat every '+m.heartbeatHours+'h' : 'idle · '+m.agents.length+' birds');
     $('mindbox').textContent = m.pending ? ('WANTS: ' + m.pending.mission + '\n\nWHY: ' + m.pending.why + (m.pending.needs_keeper ? '\n\nNEEDS YOU: ' + m.pending.needs_keeper : '')) : '';
     $('mindbox').style.whiteSpace = 'pre-wrap';
