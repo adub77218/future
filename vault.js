@@ -150,3 +150,7 @@ function grade(id, code) {
   return { id: t.id, points: pass ? t.points : 0, max: t.points, pass, runs: runs.map(r => r.pass ? 'PASS' : `FAIL(${r.passed ?? 0}/${r.total ?? '?'}${r.why ? ' ' + r.why : ''})`) };
 }
 module.exports = { allTasks, publicPrompts, grade, MAX: allTasks().reduce((s, t) => s + t.points, 0) };
+if (require.main === module) { // child-process mode: node vault.js <TASK-ID> < code-on-stdin
+  let code = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', d => code += d);
+  process.stdin.on('end', () => { try { process.stdout.write(JSON.stringify(grade(process.argv[2], code))); } catch (e) { process.stdout.write(JSON.stringify({ error: String(e.message || e) })); } process.exit(0); });
+}

@@ -78,7 +78,12 @@ async function runInWorkshop(cmd) {
       let code = null;
       try { const a = JSON.parse(await fsp.readFile(path.join(WORKSHOP, 'answers', id + '.json'), 'utf8')); code = a.code || a.fixedCode || null; } catch {}
       if (!code) { lines.push(`${id.padEnd(8)} 0 pts   (no answers/${id}.json with a "code" field)`); continue; }
-      const g = VAULT.grade(id, String(code));
+      let g;
+      try { // grade in a child process so an infinite loop in an answer can never freeze the Aviary
+        const r = require('child_process').spawnSync(process.execPath, [path.join(__dirname, 'vault.js'), id], { input: String(code), encoding: 'utf8', timeout: 10000, maxBuffer: 1e6 });
+        if (r.error && r.error.code === 'ETIMEDOUT' || r.signal) g = { id, points: 0, max: (VAULT.allTasks().find(t => t.id === id) || {}).points || 0, pass: false, runs: ['FAIL(timeout: your code ran longer than 10s — infinite loop?)'] };
+        else g = JSON.parse(r.stdout || '{}');
+      } catch (e) { g = { error: 'grader crashed: ' + String(e.message || e).slice(0, 80) }; }
       if (g.error) { lines.push(`${id.padEnd(8)} ${g.error}`); continue; }
       total += g.points; lines.push(`${id.padEnd(8)} ${String(g.points).padStart(2)}/${g.max} ${g.pass ? 'PASS' : 'FAIL'}  runs: ${g.runs.join(' ')}`);
     }
